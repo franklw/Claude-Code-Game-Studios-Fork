@@ -1,0 +1,722 @@
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: 玩家调整路网、上下客点和 Robotaxi 车队后，能否看懂拥堵从哪里来，并感到自己的规划决策有效？ -->
+<!-- Date: 2026-10-31 -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robotaxi 交通原型</title>
+<style>
+  :root { --bg:#0f1318; --panel:#171c23; --line:#2a313b; --text:#dde3ea; --dim:#8b96a3; --accent:#4fb0ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  #app { display:flex; flex-wrap:wrap; min-height:100vh; }
+  #mapWrap { flex:1 1 560px; position:relative; min-height:420px; }
+  #map { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
+  #panel { flex:0 0 330px; max-width:100%; background:var(--panel); border-left:1px solid var(--line); padding:12px 14px; overflow-y:auto; max-height:100vh; }
+  h1 { font-size:15px; margin:0 0 4px; }
+  .q { color:var(--dim); font-size:12px; margin-bottom:10px; }
+  .sec { border-top:1px solid var(--line); padding:9px 0; }
+  .sec h2 { font-size:12px; color:var(--dim); font-weight:600; margin:0 0 6px; letter-spacing:.04em; }
+  .row { display:flex; align-items:center; gap:6px; margin:4px 0; flex-wrap:wrap; }
+  button { background:#232a34; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:4px 9px; font:inherit; cursor:pointer; }
+  button:hover { border-color:#45505e; }
+  button.on { background:#1d3a55; border-color:var(--accent); }
+  #clock { font-size:22px; font-variant-numeric:tabular-nums; font-weight:600; }
+  label.sl { display:grid; grid-template-columns:96px 1fr 48px; align-items:center; gap:6px; margin:5px 0; }
+  label.sl span:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td, th { padding:2px 4px; text-align:right; }
+  td:first-child, th:first-child { text-align:left; color:var(--dim); font-weight:400; }
+  th { color:var(--dim); font-weight:500; font-size:12px; }
+  .hint { color:var(--dim); font-size:12px; }
+  .legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; font-size:12px; color:var(--dim); }
+  .legend i { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  #tip { position:absolute; pointer-events:none; background:#0b0e12ee; border:1px solid var(--line); border-radius:5px; padding:6px 8px; font-size:12px; display:none; white-space:nowrap; }
+  #banner { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:#1d3a55; border:1px solid var(--accent); border-radius:6px; padding:8px 14px; display:none; }
+  #chart { width:100%; height:120px; display:block; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="mapWrap">
+    <canvas id="map"></canvas>
+    <div id="tip"></div>
+    <div id="banner">一天结束。调整规划后点「重开这一天」，KPI 表会把这一局放到「上局」列对比。</div>
+  </div>
+  <div id="panel">
+    <h1>Robotaxi 交通原型</h1>
+    <div class="q">测试问题：调路网、建上下客点、调车队，你能看懂拥堵从哪来，并感到决策有效吗？</div>
+
+    <div class="sec">
+      <div class="row"><span id="clock">06:00</span><span class="hint" id="clockSub"></span></div>
+      <div class="row">
+        <button id="play">暂停</button>
+        <span class="hint">速度</span>
+        <button data-speed="1">1×</button><button data-speed="10">10×</button><button data-speed="60" class="on">60×</button><button data-speed="180">180×</button><button data-speed="600">600×</button>
+      </div>
+      <div class="row"><button id="reset">重开这一天</button><button id="clearPlan">清空规划</button></div>
+    </div>
+
+    <div class="sec">
+      <h2>工具（点地图）</h2>
+      <div class="row">
+        <button data-tool="inspect" class="on">查看</button>
+        <button data-tool="road">道路</button>
+        <button data-tool="bay">上下客点 <span id="bayCount">0/6</span></button>
+      </div>
+      <div class="hint" id="toolHint">悬停路段查看流量、排队和通行时间。</div>
+    </div>
+
+    <div class="sec">
+      <h2>政策与车队</h2>
+      <label class="sl"><span>出行需求</span><input id="demand" type="range" min="0.5" max="2" step="0.05" value="1"><span id="demandV"></span></label>
+      <label class="sl"><span>Robotaxi 占比</span><input id="share" type="range" min="0" max="1" step="0.05" value="0.4"><span id="shareV"></span></label>
+      <label class="sl"><span>再平衡强度</span><input id="rebal" type="range" min="0" max="1.5" step="0.05" value="0.6"><span id="rebalV"></span></label>
+      <label class="sl"><span>车队规模*</span><input id="fleet" type="range" min="50" max="800" step="10" value="350"><span id="fleetV"></span></label>
+      <div class="hint">* 车队规模在重开时生效，其余实时生效。</div>
+    </div>
+
+    <div class="sec">
+      <h2>指标</h2>
+      <table id="kpi"></table>
+    </div>
+
+    <div class="sec">
+      <h2>全天曲线 <span class="legend"><span><i style="background:#4fb0ff"></i>平均车速 km/h</span><span><i style="background:#f2b134"></i>平均候车 分钟</span></span></h2>
+      <canvas id="chart"></canvas>
+    </div>
+
+    <div class="sec legend">
+      <span><i style="background:#9aa3ad"></i>私家车</span>
+      <span><i style="background:#f2b134"></i>去接客</span>
+      <span><i style="background:#2bb3c0"></i>载客</span>
+      <span><i style="background:#a678de"></i>再平衡空驶</span>
+      <span><i style="background:transparent;border:2px solid #ff5a5a"></i>路边停靠占道</span>
+      <div class="hint" style="margin-top:6px">路段颜色 = 通行时间 / 自由流时间：绿 → 黄 → 红。虚线 = 封闭。红色数字 = 候车人数，灰色数字 = 待命 Robotaxi。</div>
+    </div>
+  </div>
+</div>
+
+<script id="sim">
+// PROTOTYPE - NOT FOR PRODUCTION
+// Simulation core: mesoscopic link-queue model (MATSim-style), congestion-aware
+// routing, robotaxi dispatch and rebalancing. No DOM access, so it can run headless.
+
+const CFG = {
+  COLS: 9, ROWS: 7, SPACING: 400,          // grid of intersections, metres
+  START: 6 * 3600, END: 22 * 3600,          // simulated day
+  VEH_LEN: 7.5,                             // metres of queue per vehicle
+  CAP_PER_LANE: 0.13,                       // veh/s per lane (~470/h: signalised approach sharing green time)
+  V_ART: 13.9, V_LOC: 11.1,                 // 50 km/h arterials, 40 km/h local
+  DWELL: 45,                                // seconds to pick up / drop off
+  BAY_CAP: 4, BAY_BUDGET: 6,
+  MAX_WAIT: 600,                            // passenger gives up after 10 min without a car assigned
+  MAX_PICKUP_ETA: 480,                      // dispatcher won't send a car more than 8 min away
+  GRAVITY_M: 3000,                          // destination choice decays with distance
+  RIVER_ROW: 4, BRIDGES: [1, 4, 7],         // river between rows 4 and 5, crossable only at these columns
+  STUCK: 60,                                // force through a full link after this long (avoid gridlock)
+  REROUTE_EVERY: 20, DISPATCH_EVERY: 5, REBAL_EVERY: 30, SAMPLE_EVERY: 300,
+  UTURN_PENALTY: 120,
+  BASE_RATE: 1200, AM_PEAK: 9000, PM_PEAK: 8500, MID: 1500,   // trips per hour
+};
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const ZONES = {
+  cbd:   { home: 1,   job: 10, color: '#24324a' },
+  mixed: { home: 3,   job: 3,  color: '#22302b' },
+  res:   { home: 6,   job: 0.5, color: '#1c2620' },
+  park:  { home: 0.5, job: 6,  color: '#2f2a1f' },
+};
+function zoneAt(c, r) {
+  if (c >= 3 && c <= 5 && r >= 2 && r <= 4) return 'cbd';
+  if (c <= 1 && r >= 5) return 'park';
+  if (c >= 2 && c <= 6 && r >= 1 && r <= 5) return 'mixed';
+  return 'res';
+}
+function segKey(a, b) { return a < b ? a + '-' + b : b + '-' + a; }
+
+function createSim(params, plan) {
+  const C = CFG;
+  const rng = mulberry32(params.seed);
+  const nodes = [], links = [], segs = {};
+  const N = C.COLS * C.ROWS;
+
+  for (let r = 0; r < C.ROWS; r++) for (let c = 0; c < C.COLS; c++) {
+    const zone = zoneAt(c, r);
+    nodes.push({ id: r * C.COLS + c, c, r, x: c * C.SPACING, y: r * C.SPACING, zone,
+      home: ZONES[zone].home, job: ZONES[zone].job,
+      out: [], in: [], idle: [], stop: [], entry: [], waiting: [],
+      bay: false, reqCount: 0, dem: 0 });
+  }
+  function addSeg(a, b, arterial, lanes) {
+    const key = segKey(a, b);
+    segs[key] = [];
+    for (const [f, t] of [[a, b], [b, a]]) {
+      const L = { id: links.length, from: f, to: t, key, len: C.SPACING,
+        vmax: arterial ? C.V_ART : C.V_LOC, defLanes: lanes || (arterial ? 2 : 1), bridge: !!lanes,
+        q: [], tokens: 0, exitCount: 0, flow: 0 };
+      L.fftt = L.len / L.vmax; L.ema = L.fftt; L.cost = L.fftt;
+      links.push(L); segs[key].push(L.id);
+      nodes[f].out.push(L.id); nodes[t].in.push(L.id);
+    }
+  }
+  for (let r = 0; r < C.ROWS; r++) for (let c = 0; c < C.COLS; c++) {
+    const id = r * C.COLS + c;
+    if (c + 1 < C.COLS) addSeg(id, id + 1, r === 3);
+    if (r + 1 < C.ROWS) {
+      if (r === C.RIVER_ROW) { if (C.BRIDGES.includes(c)) addSeg(id, id + C.COLS, c === 4, c === 4 ? 2 : 1); }
+      else addSeg(id, id + C.COLS, c === 1 || c === 4 || c === 7);
+    }
+  }
+
+  function setLanes(key, lanes) {
+    for (const lid of segs[key]) {
+      const L = links[lid];
+      L.closed = lanes === 0;
+      L.lanes = lanes || 1;                 // a closed link keeps one lane so it can drain
+      L.rate = L.lanes * C.CAP_PER_LANE;
+      L.storage = Math.max(2, Math.floor(L.len * L.lanes / C.VEH_LEN));
+      if (L.closed) L.cost = Infinity;
+    }
+  }
+  for (const key in segs) {
+    const L = links[segs[key][0]];
+    setLanes(key, plan.lanes[key] !== undefined ? plan.lanes[key] : L.defLanes);
+  }
+  for (const id of plan.bays) nodes[id].bay = true;
+
+  // ---- demand model: three trip purposes, gravity-model destinations ----
+  const purposes = {
+    am:  { o: n => n.home, d: n => n.job },
+    pm:  { o: n => n.job,  d: n => n.home },
+    oth: { o: n => n.home + n.job * 1.5, d: n => n.home + n.job * 1.5 },
+  };
+  const sampler = {};
+  for (const p in purposes) {
+    const ow = nodes.map(purposes[p].o);
+    const dcum = nodes.map(o => {
+      let acc = 0;
+      return nodes.map(d => {
+        const dist = Math.abs(o.x - d.x) + Math.abs(o.y - d.y);
+        acc += d.id === o.id ? 0 : purposes[p].d(d) * Math.exp(-dist / C.GRAVITY_M);
+        return acc;
+      });
+    });
+    let acc = 0;
+    sampler[p] = { ocum: ow.map(w => (acc += w)), dcum };
+  }
+  function pick(cum) {
+    const x = rng() * cum[cum.length - 1];
+    let lo = 0, hi = cum.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (cum[m] > x) hi = m; else lo = m + 1; }
+    return lo;
+  }
+  function poisson(l) { const L = Math.exp(-l); let k = 0, p = 1; do { k++; p *= rng(); } while (p > L); return k - 1; }
+  const g = (h, mu, s) => Math.exp(-((h - mu) ** 2) / (2 * s * s));
+
+  const sim = {
+    t: C.START, params, nodes, links, segs, taxis: [], queue: [],
+    dist: Array.from({ length: N }, () => new Float64Array(N)),
+    stats: { carTrips: 0, carTimeSum: 0, taxiTrips: 0, taxiRideSum: 0, pickups: 0, waitSum: 0,
+      abandoned: 0, dist: 0, taxiDist: 0, emptyDist: 0, vehSec: 0, curbStops: 0, bayStops: 0, rebalMoves: 0, requests: 0 },
+    win: { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 },
+    series: [],
+    setLanes(key, lanes) { setLanes(key, lanes); updateCosts(); },
+    setBay(id, on) { nodes[id].bay = on; },
+  };
+  const S = sim.stats, dist = sim.dist;
+
+  for (let i = 0; i < params.fleet; i++) {
+    const n = nodes[Math.floor(rng() * N)];
+    const v = { kind: 'taxi', state: 'idle', target: -1, node: n.id, link: -1, pref: rng(), idleSince: C.START, dwellUntil: 0, stuckSince: 0 };
+    n.idle.push(v); sim.taxis.push(v);
+  }
+
+  // ---- routing ----
+  function updateCosts() {
+    for (const L of links) {
+      if (L.q.length === 0) L.ema = 0.5 * L.ema + 0.5 * L.fftt;
+      L.cost = L.closed ? Infinity : Math.max(L.fftt, L.ema, L.q.length / L.rate);
+    }
+    const done = new Uint8Array(N);
+    for (let d = 0; d < N; d++) {
+      const D = dist[d]; D.fill(Infinity); D[d] = 0; done.fill(0);
+      for (;;) {
+        let u = -1, best = Infinity;
+        for (let i = 0; i < N; i++) if (!done[i] && D[i] < best) { best = D[i]; u = i; }
+        if (u < 0) break;
+        done[u] = 1;
+        for (const lid of nodes[u].in) {
+          const L = links[lid], nd = best + L.cost;
+          if (nd < D[L.from]) D[L.from] = nd;
+        }
+      }
+    }
+  }
+  function jitter(v, lid) { const x = Math.sin(v.pref * 9973.1 + lid * 7.13) * 43758.5453; return x - Math.floor(x); }
+  function chooseNext(v, nodeId, fromNode) {
+    let best = -1, bs = Infinity;
+    const D = dist[v.target];
+    for (const lid of nodes[nodeId].out) {
+      const L = links[lid];
+      if (L.closed) continue;
+      let s = L.cost * (1 + 0.3 * jitter(v, lid)) + D[L.to];
+      if (L.to === fromNode) s += C.UTURN_PENALTY;
+      if (s < bs) { bs = s; best = lid; }
+    }
+    if (best < 0) {                         // destination unreachable: wander on any open link
+      const open = nodes[nodeId].out.filter(l => !links[l].closed);
+      best = open.length ? open[Math.floor(rng() * open.length)] : nodes[nodeId].out[0];
+    }
+    return best;
+  }
+
+  // ---- vehicle movement ----
+  function enter(v, L, t) { L.q.push(v); v.link = L.id; v.enterT = t; v.readyT = t + L.fftt; v.stuckSince = 0; }
+  function exitLink(L, v, t) {
+    L.q.shift(); L.exitCount++;
+    L.ema = 0.8 * L.ema + 0.2 * (t - v.enterT);
+    S.dist += L.len; sim.win.dist += L.len;
+    if (v.kind === 'taxi') { S.taxiDist += L.len; if (v.state === 'pickup' || v.state === 'rebal') S.emptyDist += L.len; }
+    v.link = -1;
+  }
+  function becomeIdle(v, n, t) { v.state = 'idle'; v.target = -1; v.req = null; v.link = -1; v.node = n.id; v.idleSince = t; n.idle.push(v); }
+  function onTaxiArrive(v, n, t) {
+    if (v.state === 'pickup' && v.req && v.req.o === n.id) {
+      const q = v.req; q.pickupT = t;
+      S.pickups++; S.waitSum += t - q.t0; sim.win.pickups++; sim.win.waitSum += t - q.t0;
+      const i = n.waiting.indexOf(q); if (i >= 0) n.waiting.splice(i, 1);
+      v.state = 'occupied'; v.target = q.d;
+    } else if (v.state === 'occupied' && v.target === n.id) {
+      S.taxiTrips++; S.taxiRideSum += t - v.req.pickupT;
+      v.state = 'idle'; v.target = -1; v.req = null;
+    } else if (v.state === 'rebal') {
+      v.state = 'idle'; v.target = -1;
+    }
+  }
+  function bayUsed(n) { let k = 0; for (const v of n.stop) if (v.inBay) k++; return k; }
+
+  function moveLinks(t) {
+    const start = t % links.length;
+    for (let k = 0; k < links.length; k++) {
+      const L = links[(start + k) % links.length];
+      L.tokens = Math.min(L.tokens + L.rate, Math.max(1, L.rate));
+      while (L.q.length) {
+        const v = L.q[0];
+        if (v.readyT > t || v.dwellUntil > t) break;
+        const n = nodes[L.to];
+        if (v.target === n.id) {
+          if (v.kind === 'car') { exitLink(L, v, t); S.carTrips++; S.carTimeSum += t - v.t0; continue; }
+          if (v.state === 'rebal') { exitLink(L, v, t); onTaxiArrive(v, n, t); becomeIdle(v, n, t); continue; }
+          if (n.bay && bayUsed(n) < C.BAY_CAP) {
+            exitLink(L, v, t); v.node = n.id; v.inBay = true; v.dwellUntil = t + C.DWELL; n.stop.push(v); S.bayStops++; continue;
+          }
+          if (!v.dwelling) { v.dwelling = true; v.dwellUntil = t + C.DWELL; S.curbStops++; break; }   // stops at the curb, blocking the lane
+          v.dwelling = false; v.dwellUntil = 0;
+          onTaxiArrive(v, n, t);
+          if (v.state === 'idle') { exitLink(L, v, t); becomeIdle(v, n, t); continue; }
+        }
+        if (L.tokens < 1) break;
+        const nl = links[chooseNext(v, L.to, L.from)];
+        if (nl.q.length >= nl.storage) {    // spillback
+          if (!v.stuckSince) v.stuckSince = t;
+          if (t - v.stuckSince < C.STUCK) break;
+        }
+        L.tokens -= 1; exitLink(L, v, t); enter(v, nl, t);
+      }
+    }
+  }
+  function processStops(t) {
+    for (const n of nodes) {
+      for (let i = n.stop.length - 1; i >= 0; i--) {
+        const v = n.stop[i];
+        if (v.dwellUntil > t) continue;
+        n.stop.splice(i, 1); v.dwellUntil = 0; v.inBay = false;
+        onTaxiArrive(v, n, t);
+        if (v.state === 'idle') becomeIdle(v, n, t); else { v.node = n.id; v.stuckSince = 0; n.entry.push(v); }
+      }
+    }
+  }
+  function processEntries(t) {
+    for (const n of nodes) {
+      let k = 0;
+      while (n.entry.length && k < 3) {
+        const v = n.entry[0];
+        if (v.target === n.id) { n.entry.shift(); v.dwellUntil = t + C.DWELL; n.stop.push(v); continue; }
+        const L = links[chooseNext(v, n.id, -1)];
+        if (L.q.length >= L.storage) {
+          if (!v.stuckSince) v.stuckSince = t;
+          if (t - v.stuckSince < C.STUCK) break;
+        }
+        n.entry.shift(); enter(v, L, t); k++;
+      }
+    }
+  }
+
+  // ---- demand ----
+  function generateDemand(t) {
+    const h = t / 3600;
+    const am = C.AM_PEAK * g(h, 8, 0.8), pm = C.PM_PEAK * g(h, 17.5, 1.0), mid = C.MID * g(h, 12.5, 1.2);
+    const tot = am + pm + mid + C.BASE_RATE;
+    const n = poisson(tot * params.demand / 3600);
+    for (let i = 0; i < n; i++) {
+      const x = rng() * tot;
+      const p = x < am ? 'am' : x < am + pm ? 'pm' : 'oth';
+      const o = pick(sampler[p].ocum), d = pick(sampler[p].dcum[o]);
+      if (rng() < params.taxiShare) {
+        const q = { o, d, t0: t, assigned: null };
+        nodes[o].waiting.push(q); nodes[o].reqCount++; sim.queue.push(q); S.requests++;
+      } else {
+        nodes[o].entry.push({ kind: 'car', state: 'car', target: d, t0: t, node: o, link: -1, pref: rng(), dwellUntil: 0, stuckSince: 0 });
+      }
+    }
+  }
+
+  // ---- fleet operations ----
+  function posNode(v) { return v.link >= 0 ? links[v.link].to : v.node; }
+  function dispatch(t) {
+    sim.queue = sim.queue.filter(q => {
+      if (t - q.t0 <= C.MAX_WAIT) return true;
+      const w = nodes[q.o].waiting, i = w.indexOf(q); if (i >= 0) w.splice(i, 1);
+      S.abandoned++; return false;
+    });
+    if (!sim.queue.length) return;
+    const avail = sim.taxis.filter(v => v.state === 'idle' || v.state === 'rebal');
+    sim.queue = sim.queue.filter(q => {
+      let bi = -1, be = C.MAX_PICKUP_ETA;
+      const D = dist[q.o];
+      for (let i = 0; i < avail.length; i++) { const e = D[posNode(avail[i])]; if (e < be) { be = e; bi = i; } }
+      if (bi < 0) return true;
+      const v = avail[bi]; avail[bi] = avail[avail.length - 1]; avail.pop();
+      q.assigned = v; v.req = q;
+      if (v.state === 'idle') {
+        const n = nodes[v.node]; n.idle.splice(n.idle.indexOf(v), 1);
+        v.state = 'pickup'; v.target = q.o;
+        if (v.node === q.o) { v.dwellUntil = t + C.DWELL; n.stop.push(v); }
+        else { v.stuckSince = 0; n.entry.push(v); }
+      } else { v.state = 'pickup'; v.target = q.o; }
+      return false;
+    });
+  }
+  const DECAY = Math.exp(-C.REBAL_EVERY / 900);
+  function rebalance(t) {
+    for (const n of nodes) { n.dem = n.dem * DECAY + n.reqCount; n.reqCount = 0; }   // ~ expected requests in next 15 min
+    if (params.rebalance <= 0) return;
+    const sup = new Float64Array(N);
+    for (const n of nodes) sup[n.id] += n.idle.length;
+    for (const v of sim.taxis) {
+      if (v.state === 'rebal') sup[v.target] += 1;
+      else if (v.state === 'occupied') sup[v.target] += 0.5;
+    }
+    const def = nodes.map(n => n.dem * params.rebalance - sup[n.id]);
+    const cands = [];
+    for (const n of nodes) if (def[n.id] < 0) for (const v of n.idle) if (t - v.idleSince >= 60) cands.push(v);
+    cands.sort((a, b) => a.idleSince - b.idleSince);
+    for (const v of cands) {
+      if (def[v.node] >= 0) continue;
+      let best = -1, bs = 0.5;
+      for (let m = 0; m < N; m++) {
+        if (m === v.node || def[m] < 1) continue;
+        const s = def[m] - dist[m][v.node] / 300;
+        if (s > bs) { bs = s; best = m; }
+      }
+      if (best < 0) continue;
+      const n = nodes[v.node]; n.idle.splice(n.idle.indexOf(v), 1);
+      v.state = 'rebal'; v.target = best; v.stuckSince = 0; n.entry.push(v);
+      def[best] -= 1; def[v.node] += 1; S.rebalMoves++;
+    }
+  }
+
+  sim.step = function () {
+    const t = sim.t;
+    if (t >= C.END) return false;
+    if (t % C.REROUTE_EVERY === 0) updateCosts();
+    generateDemand(t);
+    if (t % C.DISPATCH_EVERY === 0) dispatch(t);
+    if (t % C.REBAL_EVERY === 0) rebalance(t);
+    processStops(t);
+    processEntries(t);
+    moveLinks(t);
+    let on = 0; for (const L of links) on += L.q.length;
+    sim.onNet = on; S.vehSec += on; sim.win.vehSec += on;
+    sim.t = t + 1;
+    if (sim.t % C.SAMPLE_EVERY === 0) {
+      const w = sim.win;
+      sim.series.push({ t: sim.t, speed: w.vehSec ? w.dist / w.vehSec * 3.6 : null,
+        wait: w.pickups ? w.waitSum / w.pickups / 60 : null, onNet: on, waiting: sim.queue.length });
+      for (const L of links) { L.flow = L.exitCount * 3600 / C.SAMPLE_EVERY; L.exitCount = 0; }
+      sim.win = { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 };
+    }
+    return true;
+  };
+  sim.summary = function () {
+    return {
+      trips: S.carTrips + S.taxiTrips,
+      speed: S.vehSec ? S.dist / S.vehSec * 3.6 : 0,
+      carTime: S.carTrips ? S.carTimeSum / S.carTrips / 60 : 0,
+      wait: S.pickups ? S.waitSum / S.pickups / 60 : 0,
+      abandonPct: S.requests ? S.abandoned / S.requests * 100 : 0,
+      emptyPct: S.taxiDist ? S.emptyDist / S.taxiDist * 100 : 0,
+      vkt: S.dist / 1000,
+      curbStops: S.curbStops,
+    };
+  };
+  updateCosts();
+  return sim;
+}
+</script>
+
+<script>
+// PROTOTYPE - NOT FOR PRODUCTION
+// UI: rendering, tools, controls. Hardcoded on purpose.
+const $ = id => document.getElementById(id);
+const canvas = $('map'), ctx = canvas.getContext('2d');
+const chart = $('chart'), cctx = chart.getContext('2d');
+const plan = { lanes: {}, bays: new Set() };
+const params = { seed: 42, fleet: 350, taxiShare: 0.4, demand: 1, rebalance: 0.6 };
+let sim, prevSummary = null, speed = 60, running = true, tool = 'inspect', acc = 0, last = performance.now();
+let view = { s: 1, ox: 0, oy: 0, dpr: 1 }, mouse = null;
+
+function newDay() { sim = createSim({ ...params }, plan); acc = 0; $('banner').style.display = 'none'; }
+
+// ---- controls ----
+function bindSlider(id, key, fmt) {
+  const el = $(id), out = $(id + 'V');
+  const upd = () => { params[key] = +el.value; out.textContent = fmt(+el.value); if (sim && key !== 'fleet') sim.params[key] = +el.value; };
+  el.addEventListener('input', upd); upd();
+}
+bindSlider('demand', 'demand', v => v.toFixed(2) + '×');
+bindSlider('share', 'taxiShare', v => Math.round(v * 100) + '%');
+bindSlider('rebal', 'rebalance', v => v.toFixed(2));
+bindSlider('fleet', 'fleet', v => v + ' 辆');
+
+$('play').onclick = () => { running = !running; $('play').textContent = running ? '暂停' : '继续'; };
+document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => {
+  speed = +b.dataset.speed; document.querySelectorAll('[data-speed]').forEach(x => x.classList.toggle('on', x === b));
+});
+const hints = {
+  inspect: '悬停路段查看流量、排队和通行时间。',
+  road: '点击路段循环切换：1 车道 → 2 车道 → 封闭 → 1 车道。实时生效。',
+  bay: '点击路口建/拆路外上下客点（每处 4 个泊位）。没有上下客点时，Robotaxi 会停在路边占用车道 45 秒。',
+};
+document.querySelectorAll('[data-tool]').forEach(b => b.onclick = () => {
+  tool = b.dataset.tool; document.querySelectorAll('[data-tool]').forEach(x => x.classList.toggle('on', x === b));
+  $('toolHint').textContent = hints[tool];
+});
+$('reset').onclick = () => { if (sim.t > CFG.START + 1800) prevSummary = sim.summary(); newDay(); running = true; $('play').textContent = '暂停'; };
+$('clearPlan').onclick = () => {
+  for (const key in plan.lanes) sim.setLanes(key, sim.links[sim.segs[key][0]].defLanes);
+  plan.lanes = {}; for (const id of plan.bays) sim.setBay(id, false); plan.bays.clear(); updateBayCount();
+};
+function updateBayCount() { $('bayCount').textContent = plan.bays.size + '/' + CFG.BAY_BUDGET; }
+
+// ---- geometry ----
+function resize() {
+  const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+  const m = 34, W = (CFG.COLS - 1) * CFG.SPACING, H = (CFG.ROWS - 1) * CFG.SPACING;
+  const s = Math.min((r.width - 2 * m) / W, (r.height - 2 * m) / H);
+  view = { s, ox: (r.width - W * s) / 2, oy: (r.height - H * s) / 2, dpr };
+  const cr = chart.getBoundingClientRect(); chart.width = cr.width * dpr; chart.height = cr.height * dpr;
+}
+window.addEventListener('resize', resize);
+const X = x => view.ox + x * view.s, Y = y => view.oy + y * view.s;
+function laneGeom(L) {
+  const a = sim.nodes[L.from], b = sim.nodes[L.to];
+  const x1 = X(a.x), y1 = Y(a.y), x2 = X(b.x), y2 = Y(b.y);
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+  const nx = -uy, ny = ux, off = 4 + (L.lanes - 1) * 1.5, trim = 9;
+  return { x1: x1 + ux * trim + nx * off, y1: y1 + uy * trim + ny * off, x2: x2 - ux * trim + nx * off, y2: y2 - uy * trim + ny * off, nx, ny };
+}
+function congColor(r) {
+  const stops = [[1, [63, 174, 106]], [1.6, [227, 195, 65]], [2.5, [232, 131, 58]], [4, [214, 69, 69]]];
+  if (r <= 1) return 'rgb(63,174,106)';
+  for (let i = 1; i < stops.length; i++) if (r <= stops[i][0]) {
+    const [a, ca] = stops[i - 1], [b, cb] = stops[i], f = (r - a) / (b - a);
+    return `rgb(${ca.map((c, j) => Math.round(c + (cb[j] - c) * f)).join(',')})`;
+  }
+  return 'rgb(214,69,69)';
+}
+function linkRatio(L) { return Math.max(L.cost, L.q.length / L.rate) / L.fftt; }
+
+// ---- drawing ----
+const VCOL = { car: '#9aa3ad', pickup: '#f2b134', occupied: '#2bb3c0', rebal: '#a678de' };
+function draw(frac) {
+  const W = canvas.width / view.dpr, H = canvas.height / view.dpr;
+  ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+  ctx.fillStyle = '#0f1318'; ctx.fillRect(0, 0, W, H);
+  const sp = CFG.SPACING * view.s;
+  ctx.fillStyle = '#163a5c';
+  ctx.fillRect(0, Y(CFG.RIVER_ROW * CFG.SPACING) + 14, W, sp - 28);
+  for (let r = 0; r < CFG.ROWS - 1; r++) for (let c = 0; c < CFG.COLS - 1; c++) {
+    if (r === CFG.RIVER_ROW) continue;
+    ctx.fillStyle = ZONES[zoneAt(c + 0.5, r + 0.5)].color;
+    ctx.fillRect(X(c * CFG.SPACING) + 12, Y(r * CFG.SPACING) + 12, sp - 24, sp - 24);
+  }
+  ctx.lineCap = 'round';
+  for (const L of sim.links) {
+    const g = laneGeom(L);
+    ctx.strokeStyle = L.closed ? '#555d68' : congColor(linkRatio(L));
+    ctx.lineWidth = L.closed ? 1.5 : 1.5 + L.lanes * 1.3;
+    ctx.setLineDash(L.closed ? [4, 4] : []);
+    if (L.bridge) { ctx.save(); ctx.strokeStyle = '#0b2a45'; ctx.lineWidth = 16; ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke(); ctx.restore(); }
+    ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  const tr = sim.t + frac;
+  for (const L of sim.links) {
+    if (!L.q.length) continue;
+    const g = laneGeom(L), slot = CFG.VEH_LEN / L.len / L.lanes;
+    for (let k = 0; k < L.q.length; k++) {
+      const v = L.q[k];
+      const p = Math.max(0, Math.min((tr - v.enterT) / L.fftt, 1 - k * slot));
+      const lo = L.lanes > 1 ? ((k % L.lanes) - (L.lanes - 1) / 2) * 2.6 : 0;
+      const x = g.x1 + (g.x2 - g.x1) * p + g.nx * lo, y = g.y1 + (g.y2 - g.y1) * p + g.ny * lo;
+      ctx.fillStyle = VCOL[v.state];
+      ctx.beginPath(); ctx.arc(x, y, v.kind === 'taxi' ? 2.4 : 1.8, 0, 7); ctx.fill();
+      if (v.dwelling) { ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.stroke(); }
+    }
+  }
+  ctx.font = '600 10px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const n of sim.nodes) {
+    const x = X(n.x), y = Y(n.y);
+    ctx.fillStyle = '#3a434f'; ctx.fillRect(x - 3, y - 3, 6, 6);
+    if (n.bay) {
+      const used = n.stop.filter(v => v.inBay).length;
+      ctx.fillStyle = '#1f7a4d'; ctx.fillRect(x - 22, y - 22, 14, 14);
+      ctx.fillStyle = '#d9ffe9'; ctx.fillText('P', x - 15, y - 15);
+      ctx.fillStyle = '#7fd3a5'; ctx.fillText(used + '/' + CFG.BAY_CAP, x - 15, y - 2);
+    }
+    if (n.waiting.length) {
+      ctx.fillStyle = '#d64545'; ctx.beginPath(); ctx.arc(x + 14, y - 14, 8, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.fillText(n.waiting.length, x + 14, y - 14);
+    }
+    if (n.idle.length) { ctx.fillStyle = '#8b96a3'; ctx.fillText(n.idle.length, x + 14, y + 14); }
+  }
+  if (tool === 'bay' && mouse) {
+    const n = nearestNode(mouse.x, mouse.y);
+    if (n) { ctx.strokeStyle = '#7fd3a5'; ctx.lineWidth = 1.5; ctx.strokeRect(X(n.x) - 12, Y(n.y) - 12, 24, 24); }
+  }
+  if (tool !== 'bay' && mouse) {
+    const L = nearestLink(mouse.x, mouse.y);
+    if (L) {
+      const g = laneGeom(L);
+      ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 9; ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke();
+    }
+  }
+}
+function fmtClock(t) { const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60); return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0'); }
+function drawPanel() {
+  $('clock').textContent = fmtClock(sim.t);
+  const busy = sim.taxis.filter(v => v.state !== 'idle').length;
+  $('clockSub').textContent = `路上 ${sim.onNet || 0} 辆 · 候车 ${sim.nodes.reduce((a, n) => a + n.waiting.length, 0)} 人 · 车队忙碌 ${busy}/${sim.taxis.length}`;
+  const s = sim.summary(), p = prevSummary;
+  const rows = [
+    ['完成行程', 'trips', v => v.toFixed(0)],
+    ['平均车速 km/h', 'speed', v => v.toFixed(1)],
+    ['私家车行程 分钟', 'carTime', v => v.toFixed(1)],
+    ['Robotaxi 候车 分钟', 'wait', v => v.toFixed(1)],
+    ['放弃叫车 %', 'abandonPct', v => v.toFixed(1)],
+    ['Robotaxi 空驶 %', 'emptyPct', v => v.toFixed(1)],
+    ['总车公里', 'vkt', v => v.toFixed(0)],
+    ['路边占道停靠', 'curbStops', v => v.toFixed(0)],
+  ];
+  $('kpi').innerHTML = '<tr><th></th><th>本局</th><th>上局</th></tr>' +
+    rows.map(([name, k, f]) => `<tr><td>${name}</td><td>${f(s[k])}</td><td>${p ? f(p[k]) : '—'}</td></tr>`).join('');
+}
+function drawChart() {
+  const dpr = view.dpr, W = chart.width / dpr, H = chart.height / dpr;
+  cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cctx.clearRect(0, 0, W, H);
+  const x = t => 4 + (t - CFG.START) / (CFG.END - CFG.START) * (W - 8), pad = 14;
+  cctx.strokeStyle = '#2a313b'; cctx.lineWidth = 1; cctx.fillStyle = '#8b96a3'; cctx.font = '10px system-ui,sans-serif'; cctx.textAlign = 'center';
+  for (let h = 6; h <= 22; h += 4) { const xx = x(h * 3600); cctx.beginPath(); cctx.moveTo(xx, 0); cctx.lineTo(xx, H - pad); cctx.stroke(); cctx.fillText(h + ':00', Math.min(Math.max(xx, 14), W - 14), H - 3); }
+  const line = (key, max, col) => {
+    cctx.strokeStyle = col; cctx.lineWidth = 2; cctx.beginPath(); let started = false;
+    for (const s of sim.series) {
+      if (s[key] == null) continue;
+      const yy = (H - pad) - Math.min(s[key] / max, 1) * (H - pad - 4);
+      if (!started) { cctx.moveTo(x(s.t), yy); started = true; } else cctx.lineTo(x(s.t), yy);
+    }
+    cctx.stroke();
+  };
+  line('speed', 50, '#4fb0ff'); line('wait', 15, '#f2b134');
+  cctx.textAlign = 'left'; cctx.fillStyle = '#4fb0ff'; cctx.fillText('50', 2, 8); cctx.fillStyle = '#f2b134'; cctx.fillText('15', 18, 8);
+}
+
+// ---- picking ----
+function nearestNode(mx, my) {
+  let best = null, bd = 16;
+  for (const n of sim.nodes) { const d = Math.hypot(X(n.x) - mx, Y(n.y) - my); if (d < bd) { bd = d; best = n; } }
+  return best;
+}
+function nearestLink(mx, my) {
+  let best = null, bd = 8;
+  for (const L of sim.links) {
+    const g = laneGeom(L), dx = g.x2 - g.x1, dy = g.y2 - g.y1;
+    const t = Math.max(0, Math.min(1, ((mx - g.x1) * dx + (my - g.y1) * dy) / (dx * dx + dy * dy)));
+    const d = Math.hypot(g.x1 + dx * t - mx, g.y1 + dy * t - my);
+    if (d < bd) { bd = d; best = L; }
+  }
+  return best;
+}
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect(); mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+  const tip = $('tip');
+  const L = tool === 'inspect' ? nearestLink(mouse.x, mouse.y) : null;
+  if (!L) { tip.style.display = 'none'; return; }
+  const a = sim.nodes[L.from], b = sim.nodes[L.to];
+  const dwell = L.q.filter(v => v.dwelling).length;
+  tip.innerHTML = `路段 (${a.c},${a.r}) → (${b.c},${b.r}) · ${L.closed ? '封闭' : L.lanes + ' 车道'}<br>` +
+    `车辆 ${L.q.length} / 容量 ${L.storage}${dwell ? ` · <b style="color:#ff5a5a">路边停靠 ${dwell}</b>` : ''}<br>` +
+    `预计通行 ${isFinite(L.cost) ? L.cost.toFixed(0) : '∞'} 秒（自由流 ${L.fftt.toFixed(0)} 秒）<br>` +
+    `近 5 分钟流量 ${L.flow.toFixed(0)} 辆/小时（通行能力 ${Math.round(L.rate * 3600)}）`;
+  tip.style.display = 'block';
+  tip.style.left = Math.min(mouse.x + 14, r.width - tip.offsetWidth - 6) + 'px';
+  tip.style.top = Math.min(mouse.y + 14, r.height - tip.offsetHeight - 6) + 'px';
+});
+canvas.addEventListener('mouseleave', () => { mouse = null; $('tip').style.display = 'none'; });
+canvas.addEventListener('click', e => {
+  const r = canvas.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  if (tool === 'road') {
+    const L = nearestLink(mx, my); if (!L) return;
+    const cur = L.closed ? 0 : L.lanes, next = cur === 1 ? 2 : cur === 2 ? 0 : 1;
+    plan.lanes[L.key] = next; sim.setLanes(L.key, next);
+  } else if (tool === 'bay') {
+    const n = nearestNode(mx, my); if (!n) return;
+    if (plan.bays.has(n.id)) { plan.bays.delete(n.id); sim.setBay(n.id, false); }
+    else if (plan.bays.size < CFG.BAY_BUDGET) { plan.bays.add(n.id); sim.setBay(n.id, true); }
+    updateBayCount();
+  }
+});
+
+// ---- loop ----
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
+  if (running) {
+    acc += dt * speed;
+    let steps = Math.floor(acc); acc -= steps;
+    while (steps-- > 0) {
+      if (!sim.step()) { running = false; $('play').textContent = '继续'; $('banner').style.display = 'block'; acc = 0; break; }
+    }
+  }
+  draw(running && speed <= 10 ? acc : 0);
+  drawPanel(); drawChart();
+  requestAnimationFrame(frame);
+}
+newDay(); resize(); updateBayCount();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
