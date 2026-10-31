@@ -37,6 +37,12 @@
   #tip { position:absolute; pointer-events:none; background:#0b0e12ee; border:1px solid var(--line); border-radius:5px; padding:6px 8px; font-size:12px; display:none; white-space:nowrap; }
   #banner { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:#1d3a55; border:1px solid var(--accent); border-radius:6px; padding:8px 14px; display:none; }
   #chart { width:100%; height:120px; display:block; }
+  #legend { margin-top:6px; }
+  #phase { font-size:12px; color:#ffd479; min-height:18px; }
+  .bars div { display:grid; grid-template-columns:64px 1fr 56px; align-items:center; gap:6px; font-size:12px; margin:2px 0; }
+  .bars b { display:block; height:8px; border-radius:2px; }
+  .bars span:first-child { color:var(--dim); }
+  .bars span:last-child { text-align:right; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -52,6 +58,7 @@
 
     <div class="sec">
       <div class="row"><span id="clock">06:00</span><span class="hint" id="clockSub"></span></div>
+      <div id="phase"></div>
       <div class="row">
         <button id="play">暂停</button>
         <span class="hint">速度</span>
@@ -67,7 +74,18 @@
         <button data-tool="road">道路</button>
         <button data-tool="bay">上下客点 <span id="bayCount">0/6</span></button>
       </div>
-      <div class="hint" id="toolHint">悬停路段查看流量、排队和通行时间。</div>
+      <div class="hint" id="toolHint">悬停路段查看流量、排队和通行时间；悬停街区查看地块信息。</div>
+    </div>
+
+    <div class="sec">
+      <h2>视图（地图按什么着色）</h2>
+      <div class="row">
+        <button data-lens="state" class="on">车辆状态</button>
+        <button data-lens="purpose">出行目的</button>
+        <button data-lens="demand">叫车热度</button>
+        <button data-lens="roads">仅道路</button>
+      </div>
+      <div class="legend" id="legend"></div>
     </div>
 
     <div class="sec">
@@ -76,7 +94,13 @@
       <label class="sl"><span>Robotaxi 占比</span><input id="share" type="range" min="0" max="1" step="0.05" value="0.4"><span id="shareV"></span></label>
       <label class="sl"><span>再平衡强度</span><input id="rebal" type="range" min="0" max="1.5" step="0.05" value="0.6"><span id="rebalV"></span></label>
       <label class="sl"><span>车队规模*</span><input id="fleet" type="range" min="50" max="800" step="10" value="350"><span id="fleetV"></span></label>
+      <label class="row"><input id="event" type="checkbox" checked> 今晚体育场有赛事（18:30 入场，21:30 散场）</label>
       <div class="hint">* 车队规模在重开时生效，其余实时生效。</div>
+    </div>
+
+    <div class="sec">
+      <h2>城市信息</h2>
+      <div id="city"></div>
     </div>
 
     <div class="sec">
@@ -89,13 +113,8 @@
       <canvas id="chart"></canvas>
     </div>
 
-    <div class="sec legend">
-      <span><i style="background:#9aa3ad"></i>私家车</span>
-      <span><i style="background:#f2b134"></i>去接客</span>
-      <span><i style="background:#2bb3c0"></i>载客</span>
-      <span><i style="background:#a678de"></i>再平衡空驶</span>
-      <span><i style="background:transparent;border:2px solid #ff5a5a"></i>路边停靠占道</span>
-      <div class="hint" style="margin-top:6px">路段颜色 = 通行时间 / 自由流时间：绿 → 黄 → 红。虚线 = 封闭。红色数字 = 候车人数，灰色数字 = 待命 Robotaxi。</div>
+    <div class="sec hint">
+      路段颜色 = 通行时间 / 自由流时间：绿 → 黄 → 红。虚线 = 封闭。路口红色数字 = 候车人数，灰色数字 = 待命 Robotaxi。街区边框颜色 = 所属片区，灰框 = 地标。
     </div>
   </div>
 </div>
@@ -107,7 +126,7 @@
 
 const CFG = {
   COLS: 9, ROWS: 7, SPACING: 400,          // grid of intersections, metres
-  START: 6 * 3600, END: 22 * 3600,          // simulated day
+  START: 6 * 3600, END: 23 * 3600,          // simulated day
   VEH_LEN: 7.5,                             // metres of queue per vehicle
   CAP_PER_LANE: 0.13,                       // veh/s per lane (~470/h: signalised approach sharing green time)
   V_ART: 13.9, V_LOC: 11.1,                 // 50 km/h arterials, 40 km/h local
@@ -120,8 +139,11 @@ const CFG = {
   STUCK: 60,                                // force through a full link after this long (avoid gridlock)
   REROUTE_EVERY: 20, DISPATCH_EVERY: 5, REBAL_EVERY: 30, SAMPLE_EVERY: 300,
   UTURN_PENALTY: 120,
-  BASE_RATE: 1200, AM_PEAK: 9000, PM_PEAK: 8500, MID: 1500,   // trips per hour
+  // trips per hour at demand 1.0, by purpose
+  AM_PEAK: 6500, PM_PEAK: 6000, RAIL_AM: 2000, RAIL_PM: 1800, RAIL_BASE: 120,
+  UNI: 600, HOSP: 300, BASE_RATE: 1200, MID: 1500, NIGHT: 1500, EVENT_IN: 3000, EVENT_OUT: 5000,
 };
+const gauss = (h, mu, s) => Math.exp(-((h - mu) ** 2) / (2 * s * s));
 
 function mulberry32(a) {
   return function () {
@@ -132,18 +154,68 @@ function mulberry32(a) {
   };
 }
 
-const ZONES = {
-  cbd:   { home: 1,   job: 10, color: '#24324a' },
-  mixed: { home: 3,   job: 3,  color: '#22302b' },
-  res:   { home: 6,   job: 0.5, color: '#1c2620' },
-  park:  { home: 0.5, job: 6,  color: '#2f2a1f' },
+// ---- the city: named blocks between intersections ----
+// w = trip-attraction weights the block adds to its four corner intersections.
+const BLOCK_TYPES = {
+  res:      { label: '住宅',   fill: '#26301f', w: { home: 6, job: 0.5, leisure: 0.5 } },
+  office:   { label: '办公',   fill: '#232c40', w: { home: 0.5, job: 10, leisure: 0.5 } },
+  shop:     { label: '商业',   fill: '#3a3020', w: { home: 1, job: 3, leisure: 5 } },
+  mixed:    { label: '混合',   fill: '#2b2e2a', w: { home: 3, job: 3, leisure: 1.5 } },
+  industry: { label: '产业',   fill: '#33291e', w: { home: 0.3, job: 8 } },
+  night:    { label: '夜生活', fill: '#382036', w: { home: 1, job: 2, leisure: 2, night: 6 } },
+  park:     { label: '公园',   fill: '#1f4a2a', w: { leisure: 3 }, icon: '🌳' },
+  museum:   { label: '博物馆', fill: '#4a4a42', w: { job: 1, leisure: 4 }, icon: '🏛️' },
+  uni:      { label: '大学',   fill: '#434a42', w: { home: 1, job: 2, uni: 1 }, icon: '🎓' },
+  hospital: { label: '医院',   fill: '#4a4242', w: { job: 3, hosp: 1 }, icon: '🏥' },
+  stadium:  { label: '体育场', fill: '#42424c', w: { job: 0.5, stadium: 1 }, icon: '🏟️' },
+  station:  { label: '火车站', fill: '#454545', w: { job: 1, station: 1 }, icon: '🚉' },
 };
-function zoneAt(c, r) {
-  if (c >= 3 && c <= 5 && r >= 2 && r <= 4) return 'cbd';
-  if (c <= 1 && r >= 5) return 'park';
-  if (c >= 2 && c <= 6 && r >= 1 && r <= 5) return 'mixed';
-  return 'res';
-}
+const GROUPS = {
+  brown: ['#8b5a2b', '西北'], sky: ['#5bb4e5', '北岸'], pink: ['#d0457f', '老城'], red: ['#d63c3c', '中央商务'],
+  yellow: ['#e3c341', '商圈'], orange: ['#e8873a', '东城'], green: ['#3fae6a', '西滨江'], navy: ['#3d62d6', '江景'],
+  purple: ['#8a5cc7', '产业'], teal: ['#2aa198', '南岸'],
+};
+// [col, row, name, type, group, rail-direction]; block row 4 is the river
+const BLOCKS = [
+  [0, 0, '北郊住宅', 'res', 'brown'], [1, 0, '枫林住宅', 'res', 'brown'], [2, 0, '大学', 'uni'], [3, 0, '北站', 'station', null, 'n'],
+  [4, 0, '书院街', 'mixed', 'sky'], [5, 0, '松柏住宅', 'res', 'sky'], [6, 0, '云杉住宅', 'res', 'sky'], [7, 0, '东郊住宅', 'res', 'sky'],
+  [0, 1, '西园住宅', 'res', 'brown'], [1, 1, '体育场', 'stadium'], [2, 1, '文昌路', 'mixed', 'pink'], [3, 1, '金融街', 'office', 'red'],
+  [4, 1, '中央大道', 'office', 'red'], [5, 1, '商业广场', 'shop', 'yellow'], [6, 1, '医院', 'hospital'], [7, 1, '东湖住宅', 'res', 'orange'],
+  [0, 2, '西园二区', 'res', 'brown'], [1, 2, '老城区', 'mixed', 'pink'], [2, 2, '市政厅', 'office', 'pink'], [3, 2, '中央公园', 'park'],
+  [4, 2, '科技园', 'office', 'red'], [5, 2, '百货大楼', 'shop', 'yellow'], [6, 2, '东城', 'mixed', 'orange'], [7, 2, '东站', 'station', null, 'e'],
+  [0, 3, '滨江住宅', 'res', 'green'], [1, 3, '码头仓库', 'industry', 'green'], [2, 3, '夜市', 'night', 'green'], [3, 3, '滨江路', 'office', 'navy'],
+  [4, 3, '江景大厦', 'office', 'navy'], [5, 3, '博物馆', 'museum'], [6, 3, '滨江公寓', 'mixed', 'orange'], [7, 3, '渔人码头', 'night', 'orange'],
+  [0, 5, '产业园', 'industry', 'purple'], [1, 5, '产业园二期', 'industry', 'purple'], [2, 5, '南岸住宅', 'res', 'teal'], [3, 5, '南岸花园', 'res', 'teal'],
+  [4, 5, '南站', 'station', null, 's'], [5, 5, '南岸新城', 'res', 'teal'], [6, 5, '南岸二区', 'res', 'teal'], [7, 5, '南郊住宅', 'res', 'teal'],
+].map(([c, r, name, type, group, rail]) => ({ c, r, name, type, group, rail }));
+const ATTRS = ['home', 'job', 'leisure', 'night', 'uni', 'hosp', 'stadium', 'station'];
+
+// Trip purposes. Each leg draws origins/destinations from a node weight (gravity-model destinations).
+// 'mix' = anyone out and about: home + 1.5 x job.
+const PURPOSES = [
+  { key: 'commute', label: '通勤', color: '#4fb0ff', legs: [
+    { rate: h => CFG.AM_PEAK * gauss(h, 8, 0.8), o: 'home', d: 'job' },
+    { rate: h => CFG.PM_PEAK * gauss(h, 17.5, 1.0), o: 'job', d: 'home' }] },
+  { key: 'rail', label: '车站接驳', color: '#f28c38', legs: [
+    { rate: h => CFG.RAIL_AM * gauss(h, 8.2, 0.7), o: 'station', d: 'job' },
+    { rate: h => CFG.RAIL_PM * gauss(h, 17.6, 0.9), o: 'job', d: 'station' },
+    { rate: () => CFG.RAIL_BASE, o: 'station', d: 'mix' },
+    { rate: () => CFG.RAIL_BASE, o: 'mix', d: 'station' }] },
+  { key: 'school', label: '上学', color: '#9be36b', legs: [
+    { rate: h => CFG.UNI * gauss(h, 8.3, 0.6), o: 'home', d: 'uni' },
+    { rate: h => CFG.UNI * 0.8 * gauss(h, 16.5, 1.2), o: 'uni', d: 'home' }] },
+  { key: 'medical', label: '就医', color: '#ff6b6b', legs: [
+    { rate: h => CFG.HOSP * gauss(h, 11, 2.5), o: 'home', d: 'hosp' },
+    { rate: h => CFG.HOSP * gauss(h, 14, 2.5), o: 'hosp', d: 'home' }] },
+  { key: 'leisure', label: '购物休闲', color: '#e3c341', legs: [
+    { rate: h => CFG.BASE_RATE + CFG.MID * gauss(h, 12.5, 1.2), o: 'mix', d: 'leisure' }] },
+  { key: 'night', label: '夜生活', color: '#c77dff', legs: [
+    { rate: h => CFG.NIGHT * gauss(h, 20, 1.2), o: 'mix', d: 'night' },
+    { rate: h => CFG.NIGHT * 0.7 * gauss(h, 22, 0.6), o: 'night', d: 'home' }] },
+  { key: 'event', label: '体育赛事', color: '#ff9de2', event: true, legs: [
+    { rate: h => CFG.EVENT_IN * gauss(h, 18.6, 0.45), o: 'home', d: 'stadium' },
+    { rate: h => CFG.EVENT_OUT * gauss(h, 21.6, 0.25), o: 'stadium', d: 'home' }] },
+];
 function segKey(a, b) { return a < b ? a + '-' + b : b + '-' + a; }
 
 function createSim(params, plan) {
@@ -153,11 +225,15 @@ function createSim(params, plan) {
   const N = C.COLS * C.ROWS;
 
   for (let r = 0; r < C.ROWS; r++) for (let c = 0; c < C.COLS; c++) {
-    const zone = zoneAt(c, r);
-    nodes.push({ id: r * C.COLS + c, c, r, x: c * C.SPACING, y: r * C.SPACING, zone,
-      home: ZONES[zone].home, job: ZONES[zone].job,
+    nodes.push({ id: r * C.COLS + c, c, r, x: c * C.SPACING, y: r * C.SPACING,
+      w: Object.fromEntries(ATTRS.map(a => [a, 0])),
       out: [], in: [], idle: [], stop: [], entry: [], waiting: [],
       bay: false, reqCount: 0, dem: 0 });
+  }
+  for (const b of BLOCKS) {
+    const bw = BLOCK_TYPES[b.type].w;
+    b.nodes = [[b.c, b.r], [b.c + 1, b.r], [b.c, b.r + 1], [b.c + 1, b.r + 1]].map(([c, r]) => r * C.COLS + c);
+    for (const id of b.nodes) for (const a in bw) nodes[id].w[a] += bw[a] / 4;
   }
   function addSeg(a, b, arterial, lanes) {
     const key = segKey(a, b);
@@ -196,25 +272,21 @@ function createSim(params, plan) {
   }
   for (const id of plan.bays) nodes[id].bay = true;
 
-  // ---- demand model: three trip purposes, gravity-model destinations ----
-  const purposes = {
-    am:  { o: n => n.home, d: n => n.job },
-    pm:  { o: n => n.job,  d: n => n.home },
-    oth: { o: n => n.home + n.job * 1.5, d: n => n.home + n.job * 1.5 },
-  };
-  const sampler = {};
-  for (const p in purposes) {
-    const ow = nodes.map(purposes[p].o);
+  // ---- demand model: trip purposes (PURPOSES), gravity-model destinations ----
+  const weightOf = (n, k) => k === 'mix' ? n.w.home + n.w.job * 1.5 : n.w[k];
+  const legs = [];
+  for (const p of PURPOSES) for (const leg of p.legs) {
+    let acc = 0;
+    const ocum = nodes.map(n => (acc += weightOf(n, leg.o)));
     const dcum = nodes.map(o => {
-      let acc = 0;
+      let a = 0;
       return nodes.map(d => {
         const dist = Math.abs(o.x - d.x) + Math.abs(o.y - d.y);
-        acc += d.id === o.id ? 0 : purposes[p].d(d) * Math.exp(-dist / C.GRAVITY_M);
-        return acc;
+        a += d.id === o.id ? 0 : weightOf(d, leg.d) * Math.exp(-dist / C.GRAVITY_M);
+        return a;
       });
     });
-    let acc = 0;
-    sampler[p] = { ocum: ow.map(w => (acc += w)), dcum };
+    legs.push({ p, rate: leg.rate, ocum, dcum });
   }
   function pick(cum) {
     const x = rng() * cum[cum.length - 1];
@@ -223,13 +295,14 @@ function createSim(params, plan) {
     return lo;
   }
   function poisson(l) { const L = Math.exp(-l); let k = 0, p = 1; do { k++; p *= rng(); } while (p > L); return k - 1; }
-  const g = (h, mu, s) => Math.exp(-((h - mu) ** 2) / (2 * s * s));
 
   const sim = {
-    t: C.START, params, nodes, links, segs, taxis: [], queue: [],
+    t: C.START, params, nodes, links, segs, blocks: BLOCKS, taxis: [], queue: [],
+    population: Math.round(BLOCKS.reduce((a, b) => a + (BLOCK_TYPES[b.type].w.home || 0), 0) * 900),
     dist: Array.from({ length: N }, () => new Float64Array(N)),
     stats: { carTrips: 0, carTimeSum: 0, taxiTrips: 0, taxiRideSum: 0, pickups: 0, waitSum: 0,
-      abandoned: 0, dist: 0, taxiDist: 0, emptyDist: 0, vehSec: 0, curbStops: 0, bayStops: 0, rebalMoves: 0, requests: 0 },
+      abandoned: 0, dist: 0, taxiDist: 0, emptyDist: 0, vehSec: 0, curbStops: 0, bayStops: 0, rebalMoves: 0, requests: 0,
+      byPurpose: Object.fromEntries(PURPOSES.map(p => [p.key, 0])) },
     win: { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 },
     series: [],
     setLanes(key, lanes) { setLanes(key, lanes); updateCosts(); },
@@ -367,18 +440,22 @@ function createSim(params, plan) {
   // ---- demand ----
   function generateDemand(t) {
     const h = t / 3600;
-    const am = C.AM_PEAK * g(h, 8, 0.8), pm = C.PM_PEAK * g(h, 17.5, 1.0), mid = C.MID * g(h, 12.5, 1.2);
-    const tot = am + pm + mid + C.BASE_RATE;
+    const rates = legs.map(l => (l.p.event && !params.event) ? 0 : l.rate(h));
+    const tot = rates.reduce((a, b) => a + b, 0);
     const n = poisson(tot * params.demand / 3600);
     for (let i = 0; i < n; i++) {
-      const x = rng() * tot;
-      const p = x < am ? 'am' : x < am + pm ? 'pm' : 'oth';
-      const o = pick(sampler[p].ocum), d = pick(sampler[p].dcum[o]);
+      let x = rng() * tot, li = 0;
+      while (li < legs.length - 1 && x >= rates[li]) x -= rates[li++];
+      const leg = legs[li];
+      const o = pick(leg.ocum), d = pick(leg.dcum[o]);
+      if (d === o || leg.dcum[o][N - 1] === 0) continue;
+      const purpose = leg.p.key;
+      S.byPurpose[purpose]++;
       if (rng() < params.taxiShare) {
-        const q = { o, d, t0: t, assigned: null };
+        const q = { o, d, t0: t, assigned: null, purpose };
         nodes[o].waiting.push(q); nodes[o].reqCount++; sim.queue.push(q); S.requests++;
       } else {
-        nodes[o].entry.push({ kind: 'car', state: 'car', target: d, t0: t, node: o, link: -1, pref: rng(), dwellUntil: 0, stuckSince: 0 });
+        nodes[o].entry.push({ kind: 'car', state: 'car', target: d, t0: t, node: o, link: -1, pref: rng(), dwellUntil: 0, stuckSince: 0, purpose });
       }
     }
   }
@@ -484,11 +561,11 @@ const $ = id => document.getElementById(id);
 const canvas = $('map'), ctx = canvas.getContext('2d');
 const chart = $('chart'), cctx = chart.getContext('2d');
 const plan = { lanes: {}, bays: new Set() };
-const params = { seed: 42, fleet: 350, taxiShare: 0.4, demand: 1, rebalance: 0.6 };
-let sim, prevSummary = null, speed = 60, running = true, tool = 'inspect', acc = 0, last = performance.now();
+const params = { seed: 42, fleet: 350, taxiShare: 0.4, demand: 1, rebalance: 0.6, event: true };
+let sim, prevSummary = null, speed = 60, running = true, tool = 'inspect', lens = 'state', acc = 0, last = performance.now();
 let view = { s: 1, ox: 0, oy: 0, dpr: 1 }, mouse = null;
 
-function newDay() { sim = createSim({ ...params }, plan); acc = 0; $('banner').style.display = 'none'; }
+function newDay() { sim = createSim({ ...params }, plan); acc = 0; cityShown = -1; $('banner').style.display = 'none'; }
 
 // ---- controls ----
 function bindSlider(id, key, fmt) {
@@ -505,8 +582,23 @@ $('play').onclick = () => { running = !running; $('play').textContent = running 
 document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => {
   speed = +b.dataset.speed; document.querySelectorAll('[data-speed]').forEach(x => x.classList.toggle('on', x === b));
 });
+$('event').onchange = e => { params.event = e.target.checked; sim.params.event = e.target.checked; };
+const PCOL = Object.fromEntries(PURPOSES.map(p => [p.key, p.color]));
+const DIM = '#55606c';
+const sw = (color, label, ring) => `<span><i style="background:${ring ? 'transparent' : color};${ring ? `border:2px solid ${color}` : ''}"></i>${label}</span>`;
+const LEGENDS = {
+  state: () => sw('#9aa3ad', '私家车') + sw('#f2b134', '去接客') + sw('#2bb3c0', '载客') + sw('#a678de', '再平衡空驶') + sw('#ff5a5a', '路边停靠占道', true),
+  purpose: () => PURPOSES.map(p => sw(p.color, p.label)).join('') + `<div class="hint">私家车和载客 Robotaxi 按乘客的出行目的着色；空车为灰色。</div>`,
+  demand: () => sw('#ff9f43', '预测叫车（未来 15 分钟）') + `<div class="hint">圆圈越大，这个路口接下来叫车的人越多。车辆显示为灰色。</div>`,
+  roads: () => `<div class="hint">隐藏车辆，只看道路拥堵颜色。</div>`,
+};
+document.querySelectorAll('[data-lens]').forEach(b => b.onclick = () => {
+  lens = b.dataset.lens; document.querySelectorAll('[data-lens]').forEach(x => x.classList.toggle('on', x === b));
+  $('legend').innerHTML = LEGENDS[lens]();
+});
+$('legend').innerHTML = LEGENDS.state();
 const hints = {
-  inspect: '悬停路段查看流量、排队和通行时间。',
+  inspect: '悬停路段查看流量、排队和通行时间；悬停街区查看地块信息。',
   road: '点击路段循环切换：1 车道 → 2 车道 → 封闭 → 1 车道。实时生效。',
   bay: '点击路口建/拆路外上下客点（每处 4 个泊位）。没有上下客点时，Robotaxi 会停在路边占用车道 45 秒。',
 };
@@ -552,30 +644,96 @@ function linkRatio(L) { return Math.max(L.cost, L.q.length / L.rate) / L.fftt; }
 
 // ---- drawing ----
 const VCOL = { car: '#9aa3ad', pickup: '#f2b134', occupied: '#2bb3c0', rebal: '#a678de' };
+function vehColor(v) {
+  if (lens === 'state') return VCOL[v.state];
+  if (lens === 'purpose') {
+    if (v.kind === 'car') return PCOL[v.purpose];
+    return v.state === 'occupied' && v.req ? PCOL[v.req.purpose] : DIM;
+  }
+  return DIM;
+}
+function blockRect(b) {
+  const sp = CFG.SPACING * view.s;
+  return { x: X(b.c * CFG.SPACING) + 12, y: Y(b.r * CFG.SPACING) + 12, s: sp - 24 };
+}
+function drawBlocks(W, H, sp) {
+  // rail lines run from each station to the map edge
+  for (const b of sim.blocks) {
+    if (!b.rail) continue;
+    const { x, y, s } = blockRect(b), cx = x + s / 2, cy = y + s / 2;
+    const [x1, y1, x2, y2] = b.rail === 'n' ? [cx, y, cx, 0] : b.rail === 'e' ? [x + s, cy, W, cy] : [cx, y + s, cx, H];
+    const vert = b.rail !== 'e', len = Math.hypot(x2 - x1, y2 - y1);
+    ctx.strokeStyle = '#8a7f6a'; ctx.lineWidth = 2;
+    for (let t = 0; t < len; t += 6) {                                 // sleepers
+      const px = x1 + (x2 - x1) * t / len, py = y1 + (y2 - y1) * t / len;
+      ctx.beginPath();
+      if (vert) { ctx.moveTo(px - 6, py); ctx.lineTo(px + 6, py); } else { ctx.moveTo(px, py - 6); ctx.lineTo(px, py + 6); }
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#d6d6d6'; ctx.lineWidth = 1.5;                  // rails
+    for (const o of [-3.5, 3.5]) {
+      ctx.beginPath();
+      if (vert) { ctx.moveTo(x1 + o, y1); ctx.lineTo(x2 + o, y2); } else { ctx.moveTo(x1, y1 + o); ctx.lineTo(x2, y2 + o); }
+      ctx.stroke();
+    }
+  }
+  const showLabels = sp >= 70;
+  for (const b of sim.blocks) {
+    const T = BLOCK_TYPES[b.type], { x, y, s } = blockRect(b);
+    ctx.fillStyle = T.fill; ctx.fillRect(x, y, s, s);
+    if (b.type === 'park') {
+      ctx.fillStyle = '#2f7a3f';
+      for (const [fx, fy] of [[0.25, 0.3], [0.7, 0.25], [0.5, 0.55], [0.2, 0.7], [0.78, 0.68]]) { ctx.beginPath(); ctx.arc(x + s * fx, y + s * fy, s * 0.09, 0, 7); ctx.fill(); }
+    }
+    if (b.group) { ctx.strokeStyle = GROUPS[b.group][0]; ctx.lineWidth = 4; ctx.strokeRect(x + 2, y + 2, s - 4, s - 4); }
+    else { ctx.strokeStyle = '#9aa3ad'; ctx.lineWidth = 1.5; ctx.strokeRect(x + 1, y + 1, s - 2, s - 2); }
+    if (T.icon) {
+      ctx.font = `${Math.round(Math.min(26, s * 0.3))}px system-ui,"Apple Color Emoji","Segoe UI Emoji",sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(T.icon, x + s / 2, y + s * (showLabels ? 0.42 : 0.5));
+    }
+    if (showLabels) {
+      ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x + 4, y + s - 19, s - 8, 15);
+      ctx.fillStyle = '#e9edf2'; ctx.font = '600 11px system-ui,"PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(b.name, x + s / 2, y + s - 11.5);
+    }
+  }
+}
 function draw(frac) {
   const W = canvas.width / view.dpr, H = canvas.height / view.dpr;
   ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
-  ctx.fillStyle = '#0f1318'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#1c2a1d'; ctx.fillRect(0, 0, W, H);              // grass
   const sp = CFG.SPACING * view.s;
-  ctx.fillStyle = '#163a5c';
+  ctx.fillStyle = '#1d4f78';                                          // river
   ctx.fillRect(0, Y(CFG.RIVER_ROW * CFG.SPACING) + 14, W, sp - 28);
-  for (let r = 0; r < CFG.ROWS - 1; r++) for (let c = 0; c < CFG.COLS - 1; c++) {
-    if (r === CFG.RIVER_ROW) continue;
-    ctx.fillStyle = ZONES[zoneAt(c + 0.5, r + 0.5)].color;
-    ctx.fillRect(X(c * CFG.SPACING) + 12, Y(r * CFG.SPACING) + 12, sp - 24, sp - 24);
+  ctx.lineCap = 'butt';
+  for (const L of sim.links) {                                        // road surface, once per segment
+    if (L.from > L.to) continue;
+    const a = sim.nodes[L.from], b = sim.nodes[L.to];
+    ctx.strokeStyle = L.bridge ? '#5a5f68' : '#3a3f47'; ctx.lineWidth = L.bridge ? 22 : 18;
+    ctx.beginPath(); ctx.moveTo(X(a.x), Y(a.y)); ctx.lineTo(X(b.x), Y(b.y)); ctx.stroke();
   }
+  for (const n of sim.nodes) { ctx.fillStyle = '#3a3f47'; ctx.fillRect(X(n.x) - 9, Y(n.y) - 9, 18, 18); }
+  drawBlocks(W, H, sp);
   ctx.lineCap = 'round';
   for (const L of sim.links) {
     const g = laneGeom(L);
-    ctx.strokeStyle = L.closed ? '#555d68' : congColor(linkRatio(L));
+    ctx.strokeStyle = L.closed ? '#6b737e' : congColor(linkRatio(L));
     ctx.lineWidth = L.closed ? 1.5 : 1.5 + L.lanes * 1.3;
     ctx.setLineDash(L.closed ? [4, 4] : []);
-    if (L.bridge) { ctx.save(); ctx.strokeStyle = '#0b2a45'; ctx.lineWidth = 16; ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke(); ctx.restore(); }
     ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke();
   }
   ctx.setLineDash([]);
+  if (lens === 'demand') {
+    for (const n of sim.nodes) {
+      if (n.dem < 0.5) continue;
+      ctx.fillStyle = 'rgba(255,159,67,0.45)'; ctx.strokeStyle = '#ff9f43'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(X(n.x), Y(n.y), Math.min(sp * 0.42, 4 + Math.sqrt(n.dem) * 3.2), 0, 7); ctx.fill(); ctx.stroke();
+    }
+  }
   const tr = sim.t + frac;
-  for (const L of sim.links) {
+  if (lens !== 'roads') for (const L of sim.links) {
     if (!L.q.length) continue;
     const g = laneGeom(L), slot = CFG.VEH_LEN / L.len / L.lanes;
     for (let k = 0; k < L.q.length; k++) {
@@ -583,9 +741,9 @@ function draw(frac) {
       const p = Math.max(0, Math.min((tr - v.enterT) / L.fftt, 1 - k * slot));
       const lo = L.lanes > 1 ? ((k % L.lanes) - (L.lanes - 1) / 2) * 2.6 : 0;
       const x = g.x1 + (g.x2 - g.x1) * p + g.nx * lo, y = g.y1 + (g.y2 - g.y1) * p + g.ny * lo;
-      ctx.fillStyle = VCOL[v.state];
+      ctx.fillStyle = vehColor(v);
       ctx.beginPath(); ctx.arc(x, y, v.kind === 'taxi' ? 2.4 : 1.8, 0, 7); ctx.fill();
-      if (v.dwelling) { ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.stroke(); }
+      if (v.dwelling && lens === 'state') { ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.stroke(); }
     }
   }
   ctx.font = '600 10px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -613,6 +771,9 @@ function draw(frac) {
     if (L) {
       const g = laneGeom(L);
       ctx.strokeStyle = '#ffffff88'; ctx.lineWidth = 9; ctx.beginPath(); ctx.moveTo(g.x1, g.y1); ctx.lineTo(g.x2, g.y2); ctx.stroke();
+    } else if (tool === 'inspect') {
+      const b = blockAt(mouse.x, mouse.y);
+      if (b) { const { x, y, s } = blockRect(b); ctx.strokeStyle = '#ffffffcc'; ctx.lineWidth = 2; ctx.strokeRect(x - 2, y - 2, s + 4, s + 4); }
     }
   }
 }
@@ -621,6 +782,8 @@ function drawPanel() {
   $('clock').textContent = fmtClock(sim.t);
   const busy = sim.taxis.filter(v => v.state !== 'idle').length;
   $('clockSub').textContent = `路上 ${sim.onNet || 0} 辆 · 候车 ${sim.nodes.reduce((a, n) => a + n.waiting.length, 0)} 人 · 车队忙碌 ${busy}/${sim.taxis.length}`;
+  $('phase').textContent = phaseText(sim.t / 3600);
+  drawCity();
   const s = sim.summary(), p = prevSummary;
   const rows = [
     ['完成行程', 'trips', v => v.toFixed(0)],
@@ -634,6 +797,34 @@ function drawPanel() {
   ];
   $('kpi').innerHTML = '<tr><th></th><th>本局</th><th>上局</th></tr>' +
     rows.map(([name, k, f]) => `<tr><td>${name}</td><td>${f(s[k])}</td><td>${p ? f(p[k]) : '—'}</td></tr>`).join('');
+}
+function phaseText(h) {
+  const ev = sim.params.event;
+  if (ev && h >= 21 && h < 22.2) return '🏟️ 赛事散场：体育场周边叫车激增';
+  if (ev && h >= 17.8 && h < 19.2) return '晚高峰 · 🏟️ 体育场赛事入场';
+  if (h < 7) return '清晨：车流稀少';
+  if (h < 9.5) return '早高峰：通勤、车站接驳、上学';
+  if (h < 11.5) return '平峰';
+  if (h < 13.5) return '午间：购物休闲';
+  if (h < 16) return '平峰';
+  if (h < 19.5) return '晚高峰：下班通勤、车站接驳';
+  if (h < 22.2) return '夜间：夜生活';
+  return '深夜：夜生活返程';
+}
+let cityShown = -1;
+function drawCity() {
+  if (sim.t === cityShown) return;                                   // only when the sim has advanced
+  cityShown = sim.t;
+  const S = sim.stats, total = PURPOSES.reduce((a, p) => a + S.byPurpose[p.key], 0) || 1;
+  const done = S.taxiTrips + S.carTrips + S.abandoned || 1, pct = v => (v / done * 100).toFixed(0) + '%';
+  $('city').innerHTML =
+    `<div class="row hint">人口（按住宅估算）<b style="color:var(--text);margin-left:auto">${sim.population.toLocaleString()}</b></div>` +
+    `<div class="row hint">今日已结束的出行：Robotaxi ${pct(S.taxiTrips)} · 私家车 ${pct(S.carTrips)} · 放弃叫车 ${pct(S.abandoned)}</div>` +
+    `<div class="hint" style="margin:6px 0 2px">今日出行目的（共 ${total.toLocaleString()} 次）</div>` +
+    `<div class="bars">${PURPOSES.map(p => {
+      const v = S.byPurpose[p.key];
+      return `<div><span>${p.label}</span><b style="width:${(v / total * 100).toFixed(1)}%;background:${p.color}"></b><span>${(v / total * 100).toFixed(0)}%</span></div>`;
+    }).join('')}</div>`;
 }
 function drawChart() {
   const dpr = view.dpr, W = chart.width / dpr, H = chart.height / dpr;
@@ -671,17 +862,40 @@ function nearestLink(mx, my) {
   }
   return best;
 }
+function blockAt(mx, my) {
+  return sim.blocks.find(b => { const { x, y, s } = blockRect(b); return mx >= x && mx <= x + s && my >= y && my <= y + s; });
+}
+// A segment is named after the blocks on either side of it, e.g. "金融街 / 中央大道 之间".
+const BRIDGE_NAMES = { 1: '西桥', 4: '中央大桥', 7: '东桥' };
+function linkName(L) {
+  const a = sim.nodes[L.from], b = sim.nodes[L.to];
+  if (L.bridge) return `${BRIDGE_NAMES[a.c] || '大桥'}（${b.r > a.r ? '向南' : '向北'}）`;
+  const side = a.r === b.r
+    ? [[Math.min(a.c, b.c), a.r - 1], [Math.min(a.c, b.c), a.r]]
+    : [[a.c - 1, Math.min(a.r, b.r)], [a.c, Math.min(a.r, b.r)]];
+  const names = side.map(([c, r]) => sim.blocks.find(k => k.c === c && k.r === r)).filter(Boolean).map(k => k.name);
+  const dir = a.r === b.r ? (b.c > a.c ? '向东' : '向西') : (b.r > a.r ? '向南' : '向北');
+  return (names.length ? names.join(' / ') + ' 旁' : '城市边缘') + `（${dir}）`;
+}
 canvas.addEventListener('mousemove', e => {
   const r = canvas.getBoundingClientRect(); mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
   const tip = $('tip');
   const L = tool === 'inspect' ? nearestLink(mouse.x, mouse.y) : null;
-  if (!L) { tip.style.display = 'none'; return; }
-  const a = sim.nodes[L.from], b = sim.nodes[L.to];
-  const dwell = L.q.filter(v => v.dwelling).length;
-  tip.innerHTML = `路段 (${a.c},${a.r}) → (${b.c},${b.r}) · ${L.closed ? '封闭' : L.lanes + ' 车道'}<br>` +
-    `车辆 ${L.q.length} / 容量 ${L.storage}${dwell ? ` · <b style="color:#ff5a5a">路边停靠 ${dwell}</b>` : ''}<br>` +
-    `预计通行 ${isFinite(L.cost) ? L.cost.toFixed(0) : '∞'} 秒（自由流 ${L.fftt.toFixed(0)} 秒）<br>` +
-    `近 5 分钟流量 ${L.flow.toFixed(0)} 辆/小时（通行能力 ${Math.round(L.rate * 3600)}）`;
+  const B = tool === 'inspect' && !L ? blockAt(mouse.x, mouse.y) : null;
+  if (!L && !B) { tip.style.display = 'none'; return; }
+  if (L) {
+    const dwell = L.q.filter(v => v.dwelling).length;
+    tip.innerHTML = `<b>${linkName(L)}</b> · ${L.closed ? '封闭' : L.lanes + ' 车道'}<br>` +
+      `车辆 ${L.q.length} / 容量 ${L.storage}${dwell ? ` · <b style="color:#ff5a5a">路边停靠 ${dwell}</b>` : ''}<br>` +
+      `预计通行 ${isFinite(L.cost) ? L.cost.toFixed(0) : '∞'} 秒（自由流 ${L.fftt.toFixed(0)} 秒）<br>` +
+      `近 5 分钟流量 ${L.flow.toFixed(0)} 辆/小时（通行能力 ${Math.round(L.rate * 3600)}）`;
+  } else {
+    const T = BLOCK_TYPES[B.type], ns = B.nodes.map(id => sim.nodes[id]);
+    const wait = ns.reduce((a, n) => a + n.waiting.length, 0), dem = ns.reduce((a, n) => a + n.dem, 0) / 4;
+    tip.innerHTML = `<b>${T.icon ? T.icon + ' ' : ''}${B.name}</b> · ${T.label}` +
+      (B.group ? ` · <span style="color:${GROUPS[B.group][0]}">${GROUPS[B.group][1]}片区</span>` : ' · 地标') + '<br>' +
+      `四角路口候车 ${wait} 人 · 预测叫车 ${dem.toFixed(1)} / 15 分钟`;
+  }
   tip.style.display = 'block';
   tip.style.left = Math.min(mouse.x + 14, r.width - tip.offsetWidth - 6) + 'px';
   tip.style.top = Math.min(mouse.y + 14, r.height - tip.offsetHeight - 6) + 'px';
