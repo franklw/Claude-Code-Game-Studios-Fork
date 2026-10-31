@@ -24,7 +24,7 @@
   button:hover { border-color:#45505e; }
   button.on { background:#1d3a55; border-color:var(--accent); }
   #clock { font-size:22px; font-variant-numeric:tabular-nums; font-weight:600; }
-  label.sl { display:grid; grid-template-columns:96px 1fr 48px; align-items:center; gap:6px; margin:5px 0; }
+  label.sl { display:grid; grid-template-columns:96px 1fr 66px; align-items:center; gap:6px; margin:5px 0; }
   label.sl span:last-child { text-align:right; font-variant-numeric:tabular-nums; }
   input[type=range] { width:100%; }
   table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
@@ -38,6 +38,8 @@
   #banner { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:#1d3a55; border:1px solid var(--accent); border-radius:6px; padding:8px 14px; display:none; }
   #chart { width:100%; height:120px; display:block; }
   #legend { margin-top:6px; }
+  label.chk { display:flex; align-items:flex-start; gap:6px; margin:5px 0; font-size:12px; }
+  label.chk input { margin:2px 0 0; flex:0 0 auto; }
   #phase { font-size:12px; color:#ffd479; min-height:18px; }
   .bars div { display:grid; grid-template-columns:64px 1fr 56px; align-items:center; gap:6px; font-size:12px; margin:2px 0; }
   .bars b { display:block; height:8px; border-radius:2px; }
@@ -91,10 +93,12 @@
     <div class="sec">
       <h2>政策与车队</h2>
       <label class="sl"><span>出行需求</span><input id="demand" type="range" min="0.5" max="2" step="0.05" value="1"><span id="demandV"></span></label>
-      <label class="sl"><span>Robotaxi 占比</span><input id="share" type="range" min="0" max="1" step="0.05" value="0.4"><span id="shareV"></span></label>
+      <label class="sl"><span>Robotaxi 车费</span><input id="fare" type="range" min="1" max="6" step="0.1" value="2"><span id="fareV"></span></label>
+      <label class="chk"><input id="pool" type="checkbox"> 允许拼车（同一路口上车、顺路，最多 3 人，八五折）</label>
+      <label class="chk"><input id="taxiOn" type="checkbox" checked> 启用 Robotaxi（关掉 = 对照组：只有私家车和公交）</label>
       <label class="sl"><span>再平衡强度</span><input id="rebal" type="range" min="0" max="1.5" step="0.05" value="0.6"><span id="rebalV"></span></label>
       <label class="sl"><span>车队规模*</span><input id="fleet" type="range" min="50" max="800" step="10" value="350"><span id="fleetV"></span></label>
-      <label class="row"><input id="event" type="checkbox" checked> 今晚体育场有赛事（18:30 入场，21:30 散场）</label>
+      <label class="chk"><input id="event" type="checkbox" checked> 今晚体育场有赛事（18:30 入场，21:30 散场）</label>
       <div class="hint">* 车队规模在重开时生效，其余实时生效。</div>
     </div>
 
@@ -131,6 +135,25 @@ const CFG = {
   CAP_PER_LANE: 0.13,                       // veh/s per lane (~470/h: signalised approach sharing green time)
   V_ART: 13.9, V_LOC: 11.1,                 // 50 km/h arterials, 40 km/h local
   DWELL: 45,                                // seconds to pick up / drop off
+  WALK_END: 60,                             // seconds on foot from kerb/parking to the door
+  WALK_SPEED: 1.3,                          // m/s
+  // parking: public spaces per block come from BLOCK_TYPES[].spaces; trips home use private parking
+  // spaces = measured uncapped peak demand x supply ratio (0.7 in office/shop blocks, 1.3 elsewhere)
+  PARK_SCALE: 0.5, PARK_INIT_OCC: 0.1,      // scale 0.5: supply was sized when everyone drove; ~half now do
+  CRUISE_MAX: 4,                            // intersections tried before giving up and parking far away
+  FAR_WALK: 480,                            // seconds walking from a far-away car park
+  PARK_HOURS: { commute: 9, rail: 9, school: 6, medical: 1.5, leisure: 1.5, night: 2.5, event: 3 },
+  // public transport is abstract (no buses on the roads): walk + wait + ride, ride = current car time x factor
+  PT_WALK: 300, PT_WAIT: 300, PT_FACTOR: 1.6, PT_MIN_RIDE: 180,
+  PT_STATION_WALK: 150, PT_STATION_WAIT: 150,                          // intersections next to a rail station
+  // mode choice: multinomial logit on generalised cost in yuan (time valued at VOT yuan/min)
+  VOT: 0.5, MU: 0.25,
+  DRIVE_PER_KM: 0.8, PT_FARE: 2, FARE_BASE: 6,                         // robotaxi per-km fare is the player's lever
+  PARK_PRICE: { office: 10, shop: 8, night: 6, museum: 5, stadium: 8, station: 5, hospital: 4, mixed: 3, park: 3, uni: 2, res: 0, industry: 0 },
+  ASC_CAR: 0, ASC_TAXI: 0, ASC_PT: 4,                                  // unexplained preference (yuan)
+  TAXI_WAIT_PRIOR: 240, ABANDON_PENALTY: 20,                           // expected wait before any experience; cost of a failed request
+  POOL_DISCOUNT: 0.25, POOL_TIME: 1.15,                                // expected pooled fare cut and ride-time stretch
+  POOL_CAP: 3,                                                         // riders per pooled car (all board at one corner)
   BAY_CAP: 4, BAY_BUDGET: 6,
   MAX_WAIT: 600,                            // passenger gives up after 10 min without a car assigned
   MAX_PICKUP_ETA: 480,                      // dispatcher won't send a car more than 8 min away
@@ -156,19 +179,20 @@ function mulberry32(a) {
 
 // ---- the city: named blocks between intersections ----
 // w = trip-attraction weights the block adds to its four corner intersections.
+// spaces = public parking; own = share of residents with a car.
 const BLOCK_TYPES = {
-  res:      { label: '住宅',   fill: '#26301f', w: { home: 6, job: 0.5, leisure: 0.5 } },
-  office:   { label: '办公',   fill: '#232c40', w: { home: 0.5, job: 10, leisure: 0.5 } },
-  shop:     { label: '商业',   fill: '#3a3020', w: { home: 1, job: 3, leisure: 5 } },
-  mixed:    { label: '混合',   fill: '#2b2e2a', w: { home: 3, job: 3, leisure: 1.5 } },
-  industry: { label: '产业',   fill: '#33291e', w: { home: 0.3, job: 8 } },
-  night:    { label: '夜生活', fill: '#382036', w: { home: 1, job: 2, leisure: 2, night: 6 } },
-  park:     { label: '公园',   fill: '#1f4a2a', w: { leisure: 3 }, icon: '🌳' },
-  museum:   { label: '博物馆', fill: '#4a4a42', w: { job: 1, leisure: 4 }, icon: '🏛️' },
-  uni:      { label: '大学',   fill: '#434a42', w: { home: 1, job: 2, uni: 1 }, icon: '🎓' },
-  hospital: { label: '医院',   fill: '#4a4242', w: { job: 3, hosp: 1 }, icon: '🏥' },
-  stadium:  { label: '体育场', fill: '#42424c', w: { job: 0.5, stadium: 1 }, icon: '🏟️' },
-  station:  { label: '火车站', fill: '#454545', w: { job: 1, station: 1 }, icon: '🚉' },
+  res:      { label: '住宅',   fill: '#26301f', spaces: 220, own: 0.7, w: { home: 6, job: 0.5, leisure: 0.5 } },
+  office:   { label: '办公',   fill: '#232c40', spaces: 940, own: 0.35, w: { home: 0.5, job: 10, leisure: 0.5 } },
+  shop:     { label: '商业',   fill: '#3a3020', spaces: 825, own: 0.4, w: { home: 1, job: 3, leisure: 5 } },
+  mixed:    { label: '混合',   fill: '#2b2e2a', spaces: 800, own: 0.5, w: { home: 3, job: 3, leisure: 1.5 } },
+  industry: { label: '产业',   fill: '#33291e', spaces: 1310, own: 0.55, w: { home: 0.3, job: 8 } },
+  night:    { label: '夜生活', fill: '#382036', spaces: 750, own: 0.35, w: { home: 1, job: 2, leisure: 2, night: 6 } },
+  park:     { label: '公园',   fill: '#1f4a2a', spaces: 620, own: 0.5, w: { leisure: 3 }, icon: '🌳' },
+  museum:   { label: '博物馆', fill: '#4a4a42', spaces: 1000, own: 0.5, w: { job: 1, leisure: 4 }, icon: '🏛️' },
+  uni:      { label: '大学',   fill: '#434a42', spaces: 730, own: 0.2, w: { home: 1, job: 2, uni: 1 }, icon: '🎓' },
+  hospital: { label: '医院',   fill: '#4a4242', spaces: 600, own: 0.5, w: { job: 3, hosp: 1 }, icon: '🏥' },
+  stadium:  { label: '体育场', fill: '#42424c', spaces: 2600, own: 0.5, w: { job: 0.5, stadium: 1 }, icon: '🏟️' },
+  station:  { label: '火车站', fill: '#454545', spaces: 1900, own: 0.4, w: { job: 1, station: 1 }, icon: '🚉' },
 };
 const GROUPS = {
   brown: ['#8b5a2b', '西北'], sky: ['#5bb4e5', '北岸'], pink: ['#d0457f', '老城'], red: ['#d63c3c', '中央商务'],
@@ -228,13 +252,25 @@ function createSim(params, plan) {
     nodes.push({ id: r * C.COLS + c, c, r, x: c * C.SPACING, y: r * C.SPACING,
       w: Object.fromEntries(ATTRS.map(a => [a, 0])),
       out: [], in: [], idle: [], stop: [], entry: [], waiting: [],
-      bay: false, reqCount: 0, dem: 0 });
+      bay: false, reqCount: 0, reqTotal: 0, dem: 0, cap: 0, parked: 0 });
   }
   for (const b of BLOCKS) {
-    const bw = BLOCK_TYPES[b.type].w;
+    const T = BLOCK_TYPES[b.type], bw = T.w;
     b.nodes = [[b.c, b.r], [b.c + 1, b.r], [b.c, b.r + 1], [b.c + 1, b.r + 1]].map(([c, r]) => r * C.COLS + c);
-    for (const id of b.nodes) for (const a in bw) nodes[id].w[a] += bw[a] / 4;
+    for (const id of b.nodes) {
+      for (const a in bw) nodes[id].w[a] += bw[a] / 4;
+      nodes[id].cap += T.spaces * C.PARK_SCALE / 4;
+      nodes[id].ownW = (nodes[id].ownW || 0) + (bw.home || 0) * T.own / 4;
+    }
   }
+  for (const n of nodes) {
+    n.cap = Math.round(n.cap); n.parked = Math.round(n.cap * C.PARK_INIT_OCC);
+    n.own = n.w.home > 0 ? n.ownW / n.w.home : 0.5;                   // car ownership of people living here
+    const types = BLOCKS.filter(b => b.nodes.includes(n.id)).map(b => b.type);
+    n.parkPrice = types.length ? types.reduce((a, k) => a + C.PARK_PRICE[k], 0) / types.length : 0;
+    n.waitEma = C.TAXI_WAIT_PRIOR; n.abEma = 0; n.searchEma = 0;       // what people here have recently experienced
+  }
+  const releases = new Map();                                          // minute -> intersections whose car leaves
   function addSeg(a, b, arterial, lanes) {
     const key = segKey(a, b);
     segs[key] = [];
@@ -286,7 +322,7 @@ function createSim(params, plan) {
         return a;
       });
     });
-    legs.push({ p, rate: leg.rate, ocum, dcum });
+    legs.push({ p, rate: leg.rate, ocum, dcum, toHome: leg.d === 'home', homeAtDest: leg.d === 'home' && leg.o !== 'home' });
   }
   function pick(cum) {
     const x = rng() * cum[cum.length - 1];
@@ -302,7 +338,9 @@ function createSim(params, plan) {
     dist: Array.from({ length: N }, () => new Float64Array(N)),
     stats: { carTrips: 0, carTimeSum: 0, taxiTrips: 0, taxiRideSum: 0, pickups: 0, waitSum: 0,
       abandoned: 0, dist: 0, taxiDist: 0, emptyDist: 0, vehSec: 0, curbStops: 0, bayStops: 0, rebalMoves: 0, requests: 0,
-      byPurpose: Object.fromEntries(PURPOSES.map(p => [p.key, 0])) },
+      byPurpose: Object.fromEntries(PURPOSES.map(p => [p.key, 0])),
+      d2d: { car: [0, 0], taxi: [0, 0], transit: [0, 0] },            // door-to-door [seconds, trips] by final mode
+      cruises: 0, cruiseDist: 0, farParks: 0, ptTrips: 0, fbCar: 0, fbTransit: 0, pooledRiders: 0, poolJoins: 0 },
     win: { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 },
     series: [],
     setLanes(key, lanes) { setLanes(key, lanes); updateCosts(); },
@@ -312,7 +350,7 @@ function createSim(params, plan) {
 
   for (let i = 0; i < params.fleet; i++) {
     const n = nodes[Math.floor(rng() * N)];
-    const v = { kind: 'taxi', state: 'idle', target: -1, node: n.id, link: -1, pref: rng(), idleSince: C.START, dwellUntil: 0, stuckSince: 0 };
+    const v = { kind: 'taxi', state: 'idle', target: -1, node: n.id, link: -1, pref: rng(), idleSince: C.START, dwellUntil: 0, stuckSince: 0, riders: [], stops: [] };
     n.idle.push(v); sim.taxis.push(v);
   }
 
@@ -362,21 +400,70 @@ function createSim(params, plan) {
     L.ema = 0.8 * L.ema + 0.2 * (t - v.enterT);
     S.dist += L.len; sim.win.dist += L.len;
     if (v.kind === 'taxi') { S.taxiDist += L.len; if (v.state === 'pickup' || v.state === 'rebal') S.emptyDist += L.len; }
+    else if (v.cruise) S.cruiseDist += L.len;
     v.link = -1;
   }
-  function becomeIdle(v, n, t) { v.state = 'idle'; v.target = -1; v.req = null; v.link = -1; v.node = n.id; v.idleSince = t; n.idle.push(v); }
+  // A person's trip is over: record door-to-door time (trip start -> on foot at the destination).
+  function finishTrip(mode, t0, t, walk) { const a = S.d2d[mode]; a[0] += t - t0 + walk; a[1]++; }
+  function becomeIdle(v, n, t) { v.state = 'idle'; v.target = -1; v.riders = []; v.stops = []; v.link = -1; v.node = n.id; v.idleSince = t; n.idle.push(v); }
+  // Drop-off order for riders who all board at o: nearest next stop first.
+  function dropOrder(o, riders) {
+    const left = [...new Set(riders.map(q => q.d))], order = [];
+    let at = o;
+    while (left.length) {
+      let bi = 0;
+      for (let i = 1; i < left.length; i++) if (dist[left[i]][at] < dist[left[bi]][at]) bi = i;
+      at = left.splice(bi, 1)[0]; order.push(at);
+    }
+    return order;
+  }
+  // Can these riders share one car without anyone's ride exceeding poolDetour x their direct ride?
+  function poolFits(o, riders) {
+    if (riders.length > C.POOL_CAP) return false;
+    const order = dropOrder(o, riders);
+    let at = o, elapsed = 0;
+    const reach = {};
+    for (const s of order) { elapsed += dist[s][at]; reach[s] = elapsed; elapsed += C.DWELL; at = s; }
+    return riders.every(q => reach[q.d] <= params.poolDetour * dist[q.d][o] + 60);
+  }
   function onTaxiArrive(v, n, t) {
-    if (v.state === 'pickup' && v.req && v.req.o === n.id) {
-      const q = v.req; q.pickupT = t;
-      S.pickups++; S.waitSum += t - q.t0; sim.win.pickups++; sim.win.waitSum += t - q.t0;
-      const i = n.waiting.indexOf(q); if (i >= 0) n.waiting.splice(i, 1);
-      v.state = 'occupied'; v.target = q.d;
+    if (v.state === 'pickup' && v.riders.length && v.riders[0].o === n.id) {
+      for (const q of v.riders) {
+        q.pickupT = t;
+        S.pickups++; S.waitSum += t - q.t0; sim.win.pickups++; sim.win.waitSum += t - q.t0;
+        n.waitEma = 0.9 * n.waitEma + 0.1 * (t - q.t0); n.abEma *= 0.9;
+        const i = n.waiting.indexOf(q); if (i >= 0) n.waiting.splice(i, 1);
+      }
+      if (v.riders.length > 1) S.pooledRiders += v.riders.length;
+      v.state = 'occupied'; v.stops = dropOrder(n.id, v.riders); v.target = v.stops[0];
     } else if (v.state === 'occupied' && v.target === n.id) {
-      S.taxiTrips++; S.taxiRideSum += t - v.req.pickupT;
-      v.state = 'idle'; v.target = -1; v.req = null;
+      for (const q of v.riders.filter(q => q.d === n.id)) {
+        S.taxiTrips++; S.taxiRideSum += t - q.pickupT; finishTrip('taxi', q.t0, t, C.WALK_END);
+      }
+      v.riders = v.riders.filter(q => q.d !== n.id); v.stops.shift();
+      if (v.stops.length) v.target = v.stops[0];                       // more riders on board: next stop
+      else { v.state = 'idle'; v.target = -1; }
     } else if (v.state === 'rebal') {
       v.state = 'idle'; v.target = -1;
     }
+  }
+  // Car reaches a space (own garage on trips home, public space otherwise) and the driver walks to the door.
+  function parkCar(v, n, t, extraWalk) {
+    if (!v.toHome && !extraWalk) {
+      n.parked++;
+      const until = Math.floor((t + C.PARK_HOURS[v.purpose] * 3600) / 60);
+      if (until * 60 < C.END) { if (!releases.has(until)) releases.set(until, []); releases.get(until).push(n.id); }
+    }
+    const d = nodes[v.dest], walk = (Math.abs(n.x - d.x) + Math.abs(n.y - d.y)) / C.WALK_SPEED;
+    if (!v.toHome) d.searchEma = 0.9 * d.searchEma + 0.1 * ((v.arriveT ? t - v.arriveT : 0) + walk + extraWalk);
+    S.carTrips++; S.carTimeSum += t - v.t0;
+    finishTrip('car', v.t0, t, C.WALK_END + walk + extraWalk);
+  }
+  function cruiseTarget(n, fromNode) {
+    const next = n.out.filter(l => !links[l].closed).map(l => links[l].to);
+    const free = next.filter(id => id !== fromNode && nodes[id].parked < nodes[id].cap);
+    const pool = free.length ? free : next.filter(id => id !== fromNode).length ? next.filter(id => id !== fromNode) : next;
+    return pool[Math.floor(rng() * pool.length)];
   }
   function bayUsed(n) { let k = 0; for (const v of n.stop) if (v.inBay) k++; return k; }
 
@@ -390,15 +477,22 @@ function createSim(params, plan) {
         if (v.readyT > t || v.dwellUntil > t) break;
         const n = nodes[L.to];
         if (v.target === n.id) {
-          if (v.kind === 'car') { exitLink(L, v, t); S.carTrips++; S.carTimeSum += t - v.t0; continue; }
-          if (v.state === 'rebal') { exitLink(L, v, t); onTaxiArrive(v, n, t); becomeIdle(v, n, t); continue; }
-          if (n.bay && bayUsed(n) < C.BAY_CAP) {
-            exitLink(L, v, t); v.node = n.id; v.inBay = true; v.dwellUntil = t + C.DWELL; n.stop.push(v); S.bayStops++; continue;
+          if (v.kind === 'car') {
+            if (!v.arriveT) v.arriveT = t;                             // parking search starts at the destination
+            if (v.toHome || n.parked < n.cap) { exitLink(L, v, t); parkCar(v, n, t, 0); continue; }
+            if (v.cruise >= C.CRUISE_MAX) { exitLink(L, v, t); S.farParks++; parkCar(v, n, t, C.FAR_WALK); continue; }
+            v.cruise++; S.cruises++;                                   // full: circle the block and try a neighbour
+            v.target = cruiseTarget(n, L.from);
+          } else {
+            if (v.state === 'rebal') { exitLink(L, v, t); onTaxiArrive(v, n, t); becomeIdle(v, n, t); continue; }
+            if (n.bay && bayUsed(n) < C.BAY_CAP) {
+              exitLink(L, v, t); v.node = n.id; v.inBay = true; v.dwellUntil = t + C.DWELL; n.stop.push(v); S.bayStops++; continue;
+            }
+            if (!v.dwelling) { v.dwelling = true; v.dwellUntil = t + C.DWELL; S.curbStops++; break; }   // stops at the curb, blocking the lane
+            v.dwelling = false; v.dwellUntil = 0;
+            onTaxiArrive(v, n, t);
+            if (v.state === 'idle') { exitLink(L, v, t); becomeIdle(v, n, t); continue; }
           }
-          if (!v.dwelling) { v.dwelling = true; v.dwellUntil = t + C.DWELL; S.curbStops++; break; }   // stops at the curb, blocking the lane
-          v.dwelling = false; v.dwellUntil = 0;
-          onTaxiArrive(v, n, t);
-          if (v.state === 'idle') { exitLink(L, v, t); becomeIdle(v, n, t); continue; }
         }
         if (L.tokens < 1) break;
         const nl = links[chooseNext(v, L.to, L.from)];
@@ -451,14 +545,56 @@ function createSim(params, plan) {
       if (d === o || leg.dcum[o][N - 1] === 0) continue;
       const purpose = leg.p.key;
       S.byPurpose[purpose]++;
-      if (rng() < params.taxiShare) {
-        const q = { o, d, t0: t, assigned: null, purpose };
-        nodes[o].waiting.push(q); nodes[o].reqCount++; sim.queue.push(q); S.requests++;
-      } else {
-        nodes[o].entry.push({ kind: 'car', state: 'car', target: d, t0: t, node: o, link: -1, pref: rng(), dwellUntil: 0, stuckSince: 0, purpose });
-      }
+      const trip = { o, d, purpose, toHome: leg.toHome, hasCar: rng() < nodes[leg.homeAtDest ? d : o].own };
+      const mode = chooseMode(trip);
+      if (mode === 'taxi') startTaxi(trip, t);
+      else if (mode === 'car') startCar(trip, t);
+      else startTransit(trip, t, t);
     }
   }
+  // Generalised cost (yuan) of each available mode from what the traveller can expect right now.
+  function modeCosts(trip) {
+    const o = nodes[trip.o], d = nodes[trip.d];
+    const drive = isFinite(dist[trip.d][trip.o]) ? dist[trip.d][trip.o] : Infinity;
+    const km = (Math.abs(o.x - d.x) + Math.abs(o.y - d.y)) / 1000;
+    const out = { transit: (ptTime(trip.o, trip.d) / 60) * C.VOT + C.PT_FARE + C.ASC_PT };
+    if (trip.hasCar && isFinite(drive)) {
+      const search = trip.toHome ? 0 : d.searchEma + (d.parked >= d.cap ? 180 : 0);
+      out.car = ((drive + search + C.WALK_END) / 60) * C.VOT + km * C.DRIVE_PER_KM + (trip.toHome ? 0 : d.parkPrice) + C.ASC_CAR;
+    }
+    if (params.taxiOn !== false && isFinite(drive)) {
+      const pool = params.pool ? 1 : 0;
+      const time = o.waitEma + 2 * C.DWELL + drive * (pool ? C.POOL_TIME : 1) + C.WALK_END;
+      const fare = (C.FARE_BASE + km * params.fare) * (pool ? 1 - C.POOL_DISCOUNT : 1);
+      out.taxi = (time / 60) * C.VOT + fare + o.abEma * C.ABANDON_PENALTY + C.ASC_TAXI;
+    }
+    return out;
+  }
+  function chooseMode(trip) {
+    const gc = modeCosts(trip), modes = Object.keys(gc);
+    const min = Math.min(...modes.map(m => gc[m]));
+    const w = modes.map(m => Math.exp(-C.MU * (gc[m] - min)));
+    let x = rng() * w.reduce((a, b) => a + b, 0);
+    for (let i = 0; i < modes.length; i++) { if ((x -= w[i]) <= 0) return modes[i]; }
+    return modes[modes.length - 1];
+  }
+  function startTaxi(trip, t) {
+    const q = { ...trip, t0: t, assigned: null };
+    nodes[trip.o].waiting.push(q); nodes[trip.o].reqCount++; nodes[trip.o].reqTotal++; sim.queue.push(q); S.requests++;
+  }
+  function startCar(trip, t0) {
+    nodes[trip.o].entry.push({ kind: 'car', state: 'car', target: trip.d, dest: trip.d, toHome: trip.toHome, cruise: 0,
+      t0, node: trip.o, link: -1, pref: rng(), dwellUntil: 0, stuckSince: 0, purpose: trip.purpose });
+  }
+  // Transit is not simulated on the roads; the trip ends after walk + wait + ride.
+  function ptTime(o, d) {
+    const no = nodes[o], nd = nodes[d];
+    const walk = (no.w.station > 0 ? C.PT_STATION_WALK : C.PT_WALK) + (nd.w.station > 0 ? C.PT_STATION_WALK : C.PT_WALK);
+    const wait = no.w.station > 0 ? C.PT_STATION_WAIT : C.PT_WAIT;
+    const car = dist[d][o], crow = Math.abs(no.x - nd.x) + Math.abs(no.y - nd.y);
+    return walk + wait + Math.max(C.PT_MIN_RIDE, isFinite(car) ? car * C.PT_FACTOR : crow / 5);
+  }
+  function startTransit(trip, t0, t) { S.ptTrips++; finishTrip('transit', t0, t + ptTime(trip.o, trip.d), 0); }
 
   // ---- fleet operations ----
   function posNode(v) { return v.link >= 0 ? links[v.link].to : v.node; }
@@ -466,9 +602,21 @@ function createSim(params, plan) {
     sim.queue = sim.queue.filter(q => {
       if (t - q.t0 <= C.MAX_WAIT) return true;
       const w = nodes[q.o].waiting, i = w.indexOf(q); if (i >= 0) w.splice(i, 1);
-      S.abandoned++; return false;
+      S.abandoned++;                                                   // gave up: drive if they own a car, else take transit
+      const n = nodes[q.o]; n.abEma = 0.9 * n.abEma + 0.1; n.waitEma = 0.9 * n.waitEma + 0.1 * C.MAX_WAIT;
+      if (q.hasCar) { S.fbCar++; startCar(q, q.t0); } else { S.fbTransit++; startTransit(q, q.t0, t); }
+      return false;
     });
     if (!sim.queue.length) return;
+    if (params.pool) {                                                 // join a car already on its way to this corner
+      const enRoute = sim.taxis.filter(v => v.state === 'pickup');
+      sim.queue = sim.queue.filter(q => {
+        const v = enRoute.find(v => v.riders[0].o === q.o && poolFits(q.o, [...v.riders, q]));
+        if (!v) return true;
+        v.riders.push(q); q.assigned = v; S.poolJoins++;
+        return false;
+      });
+    }
     const avail = sim.taxis.filter(v => v.state === 'idle' || v.state === 'rebal');
     sim.queue = sim.queue.filter(q => {
       let bi = -1, be = C.MAX_PICKUP_ETA;
@@ -476,7 +624,7 @@ function createSim(params, plan) {
       for (let i = 0; i < avail.length; i++) { const e = D[posNode(avail[i])]; if (e < be) { be = e; bi = i; } }
       if (bi < 0) return true;
       const v = avail[bi]; avail[bi] = avail[avail.length - 1]; avail.pop();
-      q.assigned = v; v.req = q;
+      q.assigned = v; v.riders = [q];
       if (v.state === 'idle') {
         const n = nodes[v.node]; n.idle.splice(n.idle.indexOf(v), 1);
         v.state = 'pickup'; v.target = q.o;
@@ -519,6 +667,7 @@ function createSim(params, plan) {
     const t = sim.t;
     if (t >= C.END) return false;
     if (t % C.REROUTE_EVERY === 0) updateCosts();
+    if (t % 60 === 0 && releases.has(t / 60)) { for (const id of releases.get(t / 60)) nodes[id].parked--; releases.delete(t / 60); }
     generateDemand(t);
     if (t % C.DISPATCH_EVERY === 0) dispatch(t);
     if (t % C.REBAL_EVERY === 0) rebalance(t);
@@ -538,7 +687,16 @@ function createSim(params, plan) {
     return true;
   };
   sim.summary = function () {
+    const D = S.d2d, done = D.car[1] + D.taxi[1] + D.transit[1];
     return {
+      d2d: done ? (D.car[0] + D.taxi[0] + D.transit[0]) / done / 60 : 0,
+      d2dCar: D.car[1] ? D.car[0] / D.car[1] / 60 : 0,
+      d2dTaxi: D.taxi[1] ? D.taxi[0] / D.taxi[1] / 60 : 0,
+      d2dTransit: D.transit[1] ? D.transit[0] / D.transit[1] / 60 : 0,
+      shareCar: done ? D.car[1] / done * 100 : 0,
+      shareTaxi: done ? D.taxi[1] / done * 100 : 0,
+      shareTransit: done ? D.transit[1] / done * 100 : 0,
+      pooledPct: S.taxiTrips ? S.pooledRiders / S.taxiTrips * 100 : 0,
       trips: S.carTrips + S.taxiTrips,
       speed: S.vehSec ? S.dist / S.vehSec * 3.6 : 0,
       carTime: S.carTrips ? S.carTimeSum / S.carTrips / 60 : 0,
@@ -546,6 +704,7 @@ function createSim(params, plan) {
       abandonPct: S.requests ? S.abandoned / S.requests * 100 : 0,
       emptyPct: S.taxiDist ? S.emptyDist / S.taxiDist * 100 : 0,
       vkt: S.dist / 1000,
+      cruiseKm: S.cruiseDist / 1000,
       curbStops: S.curbStops,
     };
   };
@@ -561,7 +720,7 @@ const $ = id => document.getElementById(id);
 const canvas = $('map'), ctx = canvas.getContext('2d');
 const chart = $('chart'), cctx = chart.getContext('2d');
 const plan = { lanes: {}, bays: new Set() };
-const params = { seed: 42, fleet: 350, taxiShare: 0.4, demand: 1, rebalance: 0.6, event: true };
+const params = { seed: 42, fleet: 350, demand: 1, rebalance: 0.6, event: true, fare: 2, pool: false, poolDetour: 1.4, taxiOn: true };
 let sim, prevSummary = null, speed = 60, running = true, tool = 'inspect', lens = 'state', acc = 0, last = performance.now();
 let view = { s: 1, ox: 0, oy: 0, dpr: 1 }, mouse = null;
 
@@ -574,7 +733,8 @@ function bindSlider(id, key, fmt) {
   el.addEventListener('input', upd); upd();
 }
 bindSlider('demand', 'demand', v => v.toFixed(2) + '×');
-bindSlider('share', 'taxiShare', v => Math.round(v * 100) + '%');
+bindSlider('fare', 'fare', v => v.toFixed(1) + ' 元/km');
+for (const id of ['pool', 'taxiOn']) $(id).onchange = e => { params[id] = e.target.checked; sim.params[id] = e.target.checked; };
 bindSlider('rebal', 'rebalance', v => v.toFixed(2));
 bindSlider('fleet', 'fleet', v => v + ' 辆');
 
@@ -587,7 +747,7 @@ const PCOL = Object.fromEntries(PURPOSES.map(p => [p.key, p.color]));
 const DIM = '#55606c';
 const sw = (color, label, ring) => `<span><i style="background:${ring ? 'transparent' : color};${ring ? `border:2px solid ${color}` : ''}"></i>${label}</span>`;
 const LEGENDS = {
-  state: () => sw('#9aa3ad', '私家车') + sw('#f2b134', '去接客') + sw('#2bb3c0', '载客') + sw('#a678de', '再平衡空驶') + sw('#ff5a5a', '路边停靠占道', true),
+  state: () => sw('#9aa3ad', '私家车') + sw('#ff7eb6', '找车位') + sw('#f2b134', '去接客') + sw('#2bb3c0', '载客') + sw('#a678de', '再平衡空驶') + sw('#ff5a5a', '路边停靠占道', true),
   purpose: () => PURPOSES.map(p => sw(p.color, p.label)).join('') + `<div class="hint">私家车和载客 Robotaxi 按乘客的出行目的着色；空车为灰色。</div>`,
   demand: () => sw('#ff9f43', '预测叫车（未来 15 分钟）') + `<div class="hint">圆圈越大，这个路口接下来叫车的人越多。车辆显示为灰色。</div>`,
   roads: () => `<div class="hint">隐藏车辆，只看道路拥堵颜色。</div>`,
@@ -645,10 +805,10 @@ function linkRatio(L) { return Math.max(L.cost, L.q.length / L.rate) / L.fftt; }
 // ---- drawing ----
 const VCOL = { car: '#9aa3ad', pickup: '#f2b134', occupied: '#2bb3c0', rebal: '#a678de' };
 function vehColor(v) {
-  if (lens === 'state') return VCOL[v.state];
+  if (lens === 'state') return v.cruise ? '#ff7eb6' : VCOL[v.state];
   if (lens === 'purpose') {
     if (v.kind === 'car') return PCOL[v.purpose];
-    return v.state === 'occupied' && v.req ? PCOL[v.req.purpose] : DIM;
+    return v.state === 'occupied' && v.riders.length ? PCOL[v.riders[0].purpose] : DIM;
   }
   return DIM;
 }
@@ -786,17 +946,20 @@ function drawPanel() {
   drawCity();
   const s = sim.summary(), p = prevSummary;
   const rows = [
-    ['完成行程', 'trips', v => v.toFixed(0)],
-    ['平均车速 km/h', 'speed', v => v.toFixed(1)],
-    ['私家车行程 分钟', 'carTime', v => v.toFixed(1)],
-    ['Robotaxi 候车 分钟', 'wait', v => v.toFixed(1)],
-    ['放弃叫车 %', 'abandonPct', v => v.toFixed(1)],
-    ['Robotaxi 空驶 %', 'emptyPct', v => v.toFixed(1)],
-    ['总车公里', 'vkt', v => v.toFixed(0)],
-    ['路边占道停靠', 'curbStops', v => v.toFixed(0)],
+    ['<b style="color:var(--text)">人均门到门 分钟</b>', x => `<b>${x.d2d.toFixed(1)}</b>`],
+    ['出行方式 车/Robotaxi/公交 %', x => `${x.shareCar.toFixed(0)}/${x.shareTaxi.toFixed(0)}/${x.shareTransit.toFixed(0)}`],
+    ['平均车速 km/h', x => x.speed.toFixed(1)],
+    ['Robotaxi 候车 分钟', x => x.wait.toFixed(1)],
+    ['放弃叫车 %', x => x.abandonPct.toFixed(1)],
+    ['拼车乘客 %', x => x.pooledPct.toFixed(0)],
+    ['Robotaxi 空驶 %', x => x.emptyPct.toFixed(1)],
+    ['找车位绕行 km', x => x.cruiseKm.toFixed(0)],
+    ['总车公里', x => x.vkt.toFixed(0)],
+    ['路边占道停靠', x => x.curbStops.toFixed(0)],
   ];
   $('kpi').innerHTML = '<tr><th></th><th>本局</th><th>上局</th></tr>' +
-    rows.map(([name, k, f]) => `<tr><td>${name}</td><td>${f(s[k])}</td><td>${p ? f(p[k]) : '—'}</td></tr>`).join('');
+    rows.map(([name, f]) => `<tr><td>${name}</td><td>${f(s)}</td><td>${p ? f(p) : '—'}</td></tr>`).join('') +
+    '<tr><td colspan="3" class="hint" style="text-align:left">门到门 = 出门到抵达目的地的总时间（含步行、候车、找车位），是判断 Robotaxi 好坏的主指标，越低越好。</td></tr>';
 }
 function phaseText(h) {
   const ev = sim.params.event;
@@ -816,10 +979,11 @@ function drawCity() {
   if (sim.t === cityShown) return;                                   // only when the sim has advanced
   cityShown = sim.t;
   const S = sim.stats, total = PURPOSES.reduce((a, p) => a + S.byPurpose[p.key], 0) || 1;
-  const done = S.taxiTrips + S.carTrips + S.abandoned || 1, pct = v => (v / done * 100).toFixed(0) + '%';
+  const D = S.d2d, done = D.car[1] + D.taxi[1] + D.transit[1] || 1, pct = v => (v / done * 100).toFixed(0) + '%';
   $('city').innerHTML =
     `<div class="row hint">人口（按住宅估算）<b style="color:var(--text);margin-left:auto">${sim.population.toLocaleString()}</b></div>` +
-    `<div class="row hint">今日已结束的出行：Robotaxi ${pct(S.taxiTrips)} · 私家车 ${pct(S.carTrips)} · 放弃叫车 ${pct(S.abandoned)}</div>` +
+    `<div class="row hint">市民自己选的出行方式：私家车 ${pct(D.car[1])} · Robotaxi ${pct(D.taxi[1])} · 公交 ${pct(D.transit[1])}</div>` +
+    (S.abandoned ? `<div class="row hint">叫不到车改用其他方式：${S.abandoned} 人（开车 ${S.fbCar}，公交 ${S.fbTransit}）</div>` : '') +
     `<div class="hint" style="margin:6px 0 2px">今日出行目的（共 ${total.toLocaleString()} 次）</div>` +
     `<div class="bars">${PURPOSES.map(p => {
       const v = S.byPurpose[p.key];
@@ -884,17 +1048,30 @@ canvas.addEventListener('mousemove', e => {
   const B = tool === 'inspect' && !L ? blockAt(mouse.x, mouse.y) : null;
   if (!L && !B) { tip.style.display = 'none'; return; }
   if (L) {
-    const dwell = L.q.filter(v => v.dwelling).length;
+    // who is on this link: the composition behind the colour
+    const c = { car: 0, cruise: 0, pickup: 0, occupied: 0, rebal: 0, dwell: 0, riders: 0 };
+    for (const v of L.q) {
+      if (v.dwelling) c.dwell++;
+      if (v.kind === 'car') c[v.cruise ? 'cruise' : 'car']++;
+      else { c[v.state]++; if (v.state === 'occupied') c.riders += v.riders.length; }
+    }
+    const part = (n, label, col) => n ? `<span style="color:${col}">${label} ${n}</span>` : '';
+    const mix = [part(c.car, '私家车', '#c3cad3'), part(c.cruise, '找车位', '#ff7eb6'), part(c.pickup, '去接客', '#f2b134'),
+      part(c.occupied, `载客（${c.riders} 人）`, '#2bb3c0'), part(c.rebal, '再平衡', '#a678de'), part(c.dwell, '路边停靠', '#ff5a5a')].filter(Boolean).join(' · ');
     tip.innerHTML = `<b>${linkName(L)}</b> · ${L.closed ? '封闭' : L.lanes + ' 车道'}<br>` +
-      `车辆 ${L.q.length} / 容量 ${L.storage}${dwell ? ` · <b style="color:#ff5a5a">路边停靠 ${dwell}</b>` : ''}<br>` +
+      `车辆 ${L.q.length} / 容量 ${L.storage}${mix ? '：' + mix : ''}<br>` +
       `预计通行 ${isFinite(L.cost) ? L.cost.toFixed(0) : '∞'} 秒（自由流 ${L.fftt.toFixed(0)} 秒）<br>` +
       `近 5 分钟流量 ${L.flow.toFixed(0)} 辆/小时（通行能力 ${Math.round(L.rate * 3600)}）`;
   } else {
     const T = BLOCK_TYPES[B.type], ns = B.nodes.map(id => sim.nodes[id]);
     const wait = ns.reduce((a, n) => a + n.waiting.length, 0), dem = ns.reduce((a, n) => a + n.dem, 0) / 4;
+    const parked = ns.reduce((a, n) => a + n.parked, 0), cap = ns.reduce((a, n) => a + n.cap, 0);
+    const taxiWait = ns.reduce((a, n) => a + n.waitEma, 0) / 4 / 60, price = ns.reduce((a, n) => a + n.parkPrice, 0) / 4;
     tip.innerHTML = `<b>${T.icon ? T.icon + ' ' : ''}${B.name}</b> · ${T.label}` +
       (B.group ? ` · <span style="color:${GROUPS[B.group][0]}">${GROUPS[B.group][1]}片区</span>` : ' · 地标') + '<br>' +
-      `四角路口候车 ${wait} 人 · 预测叫车 ${dem.toFixed(1)} / 15 分钟`;
+      `四角路口候车 ${wait} 人 · 预测叫车 ${dem.toFixed(1)} / 15 分钟<br>` +
+      `周边停车位 ${parked} / ${cap}${parked >= cap ? ' <b style="color:#ff7eb6">已满</b>' : ''} · 停车费约 ${price.toFixed(0)} 元<br>` +
+      `这里的人最近叫车平均等 ${taxiWait.toFixed(1)} 分钟`;
   }
   tip.style.display = 'block';
   tip.style.left = Math.min(mouse.x + 14, r.width - tip.offsetWidth - 6) + 'px';
