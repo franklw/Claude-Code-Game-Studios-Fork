@@ -35,7 +35,16 @@
   .legend span { display:inline-flex; align-items:center; gap:4px; margin-right:10px; font-size:12px; color:var(--dim); }
   .legend i { width:10px; height:10px; border-radius:50%; display:inline-block; }
   #tip { position:absolute; pointer-events:none; background:#0b0e12ee; border:1px solid var(--line); border-radius:5px; padding:6px 8px; font-size:12px; display:none; white-space:nowrap; }
-  #banner { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:#1d3a55; border:1px solid var(--accent); border-radius:6px; padding:8px 14px; display:none; }
+  #report { position:absolute; inset:16px; max-width:780px; margin:0 auto; background:#141a21f2; border:1px solid var(--line); border-radius:8px; padding:16px 18px; overflow:auto; display:none; z-index:5; }
+  #report h2 { font-size:17px; margin:0 0 4px; } #report h3 { font-size:13px; color:var(--dim); margin:14px 0 6px; font-weight:600; }
+  #report table td, #report table th { padding:4px 6px; vertical-align:middle; }
+  #report .big { font-size:28px; font-weight:700; }
+  #report .bars div { grid-template-columns:110px 1fr 40px; }
+  #report button.go { background:#1d3a55; border-color:var(--accent); padding:6px 14px; }
+  #report button:disabled { opacity:.45; cursor:not-allowed; }
+  .ok { color:#5fd38d; } .warn { color:#f2b134; } .bad { color:#ff6b6b; }
+  #camp { display:flex; gap:10px; flex-wrap:wrap; align-items:baseline; font-size:12px; color:var(--dim); margin:-4px 0 8px; }
+  #camp b { color:var(--text); font-size:15px; }
   #chart { width:100%; height:120px; display:block; }
   #legend { margin-top:6px; }
   label.chk { display:flex; align-items:flex-start; gap:6px; margin:5px 0; font-size:12px; }
@@ -52,11 +61,12 @@
   <div id="mapWrap">
     <canvas id="map"></canvas>
     <div id="tip"></div>
-    <div id="banner">一天结束。调整规划后点「重开这一天」，KPI 表会把这一局放到「上局」列对比。</div>
+    <div id="report"></div>
   </div>
   <div id="panel">
     <h1>Robotaxi 交通原型</h1>
-    <div class="q">测试问题：调路网、建上下客点、调车队，你能看懂拥堵从哪来，并感到决策有效吗？</div>
+    <div class="q">测试问题：看准时机把地面停车场改成公园好玩吗？太早改会惹怒司机，太晚改浪费了公园的好处。</div>
+    <div id="camp"></div>
 
     <div class="sec">
       <div class="row"><span id="clock">06:00</span><span class="hint" id="clockSub"></span></div>
@@ -66,7 +76,7 @@
         <span class="hint">速度</span>
         <button data-speed="1">1×</button><button data-speed="10">10×</button><button data-speed="60" class="on">60×</button><button data-speed="180">180×</button><button data-speed="600">600×</button>
       </div>
-      <div class="row"><button id="reset">重开这一天</button><button id="clearPlan">清空规划</button></div>
+      <div class="row"><button id="ff">快进到年底</button><button id="reset">重玩今年</button><button id="clearPlan">清空规划</button><button id="restartCamp">重新开始（2028）</button></div>
     </div>
 
     <div class="sec">
@@ -139,7 +149,9 @@ const CFG = {
   WALK_SPEED: 1.3,                          // m/s
   // parking: public spaces per block come from BLOCK_TYPES[].spaces; trips home use private parking
   // spaces = measured uncapped peak demand x supply ratio (0.7 in office/shop blocks, 1.3 elsewhere)
-  PARK_SCALE: 0.5, PARK_INIT_OCC: 0.1,      // scale 0.5: supply was sized when everyone drove; ~half now do
+  PARK_SCALE: 0.3, PARK_INIT_OCC: 0.1,      // 2028 is a car city: building parking is tight, surface lots fill the gap
+  LOT_SCALE: 0.6,                           // surface lots are sized separately from building parking
+  LOT_AREA_SCALE: 0.4,                      // buildings around a surface lot have little parking of their own
   CRUISE_MAX: 4,                            // intersections tried before giving up and parking far away
   FAR_WALK: 480,                            // seconds walking from a far-away car park
   PARK_HOURS: { commute: 9, rail: 9, school: 6, medical: 1.5, leisure: 1.5, night: 2.5, event: 3 },
@@ -193,6 +205,8 @@ const BLOCK_TYPES = {
   hospital: { label: '医院',   fill: '#4a4242', spaces: 600, own: 0.5, w: { job: 3, hosp: 1 }, icon: '🏥' },
   stadium:  { label: '体育场', fill: '#42424c', spaces: 2600, own: 0.5, w: { job: 0.5, stadium: 1 }, icon: '🏟️' },
   station:  { label: '火车站', fill: '#454545', spaces: 1900, own: 0.4, w: { job: 1, station: 1 }, icon: '🚉' },
+  lot:      { label: '地面停车场', fill: '#3b3e44', spaces: 1600, own: 0.5, w: { job: 0.3 }, icon: '🅿️' },
+  greened:  { label: '新公园', fill: '#2a6b3a', spaces: 0, own: 0.5, w: { leisure: 2.5 }, icon: '🌳' },  // a converted lot
 };
 const GROUPS = {
   brown: ['#8b5a2b', '西北'], sky: ['#5bb4e5', '北岸'], pink: ['#d0457f', '老城'], red: ['#d63c3c', '中央商务'],
@@ -203,13 +217,13 @@ const GROUPS = {
 const BLOCKS = [
   [0, 0, '北郊住宅', 'res', 'brown'], [1, 0, '枫林住宅', 'res', 'brown'], [2, 0, '大学', 'uni'], [3, 0, '北站', 'station', null, 'n'],
   [4, 0, '书院街', 'mixed', 'sky'], [5, 0, '松柏住宅', 'res', 'sky'], [6, 0, '云杉住宅', 'res', 'sky'], [7, 0, '东郊住宅', 'res', 'sky'],
-  [0, 1, '西园住宅', 'res', 'brown'], [1, 1, '体育场', 'stadium'], [2, 1, '文昌路', 'mixed', 'pink'], [3, 1, '金融街', 'office', 'red'],
+  [0, 1, '西园住宅', 'res', 'brown'], [1, 1, '体育场', 'stadium'], [2, 1, '文昌停车场', 'lot', 'pink'], [3, 1, '金融街', 'office', 'red'],
   [4, 1, '中央大道', 'office', 'red'], [5, 1, '商业广场', 'shop', 'yellow'], [6, 1, '医院', 'hospital'], [7, 1, '东湖住宅', 'res', 'orange'],
   [0, 2, '西园二区', 'res', 'brown'], [1, 2, '老城区', 'mixed', 'pink'], [2, 2, '市政厅', 'office', 'pink'], [3, 2, '中央公园', 'park'],
-  [4, 2, '科技园', 'office', 'red'], [5, 2, '百货大楼', 'shop', 'yellow'], [6, 2, '东城', 'mixed', 'orange'], [7, 2, '东站', 'station', null, 'e'],
-  [0, 3, '滨江住宅', 'res', 'green'], [1, 3, '码头仓库', 'industry', 'green'], [2, 3, '夜市', 'night', 'green'], [3, 3, '滨江路', 'office', 'navy'],
-  [4, 3, '江景大厦', 'office', 'navy'], [5, 3, '博物馆', 'museum'], [6, 3, '滨江公寓', 'mixed', 'orange'], [7, 3, '渔人码头', 'night', 'orange'],
-  [0, 5, '产业园', 'industry', 'purple'], [1, 5, '产业园二期', 'industry', 'purple'], [2, 5, '南岸住宅', 'res', 'teal'], [3, 5, '南岸花园', 'res', 'teal'],
+  [4, 2, '科技园', 'office', 'red'], [5, 2, '百货大楼', 'shop', 'yellow'], [6, 2, '东城停车场', 'lot', 'orange'], [7, 2, '东站', 'station', null, 'e'],
+  [0, 3, '滨江住宅', 'res', 'green'], [1, 3, '码头停车场', 'lot', 'green'], [2, 3, '夜市', 'night', 'green'], [3, 3, '滨江路', 'office', 'navy'],
+  [4, 3, '江景大厦', 'office', 'navy'], [5, 3, '博物馆', 'museum'], [6, 3, '滨江停车场', 'lot', 'orange'], [7, 3, '渔人码头', 'night', 'orange'],
+  [0, 5, '产业园', 'industry', 'purple'], [1, 5, '产业园二期', 'industry', 'purple'], [2, 5, '南岸住宅', 'res', 'teal'], [3, 5, '南岸停车场', 'lot', 'teal'],
   [4, 5, '南站', 'station', null, 's'], [5, 5, '南岸新城', 'res', 'teal'], [6, 5, '南岸二区', 'res', 'teal'], [7, 5, '南郊住宅', 'res', 'teal'],
 ].map(([c, r, name, type, group, rail]) => ({ c, r, name, type, group, rail }));
 const ATTRS = ['home', 'job', 'leisure', 'night', 'uni', 'hosp', 'stadium', 'station'];
@@ -247,26 +261,31 @@ function createSim(params, plan) {
   const rng = mulberry32(params.seed);
   const nodes = [], links = [], segs = {};
   const N = C.COLS * C.ROWS;
+  // per-run copy of the map: lots converted in earlier years are parks now
+  const blocks = BLOCKS.map(b => ({ ...b, wasLot: b.type === 'lot',
+    type: plan.converted && plan.converted.has(b.name) ? 'greened' : b.type }));
 
   for (let r = 0; r < C.ROWS; r++) for (let c = 0; c < C.COLS; c++) {
     nodes.push({ id: r * C.COLS + c, c, r, x: c * C.SPACING, y: r * C.SPACING,
       w: Object.fromEntries(ATTRS.map(a => [a, 0])),
       out: [], in: [], idle: [], stop: [], entry: [], waiting: [],
-      bay: false, reqCount: 0, reqTotal: 0, dem: 0, cap: 0, parked: 0 });
+      bay: false, reqCount: 0, reqTotal: 0, dem: 0, cap: 0, parked: 0, modes: { car: 0, taxi: 0, transit: 0 } });
   }
-  for (const b of BLOCKS) {
+  for (const b of blocks) b.nodes = [[b.c, b.r], [b.c + 1, b.r], [b.c, b.r + 1], [b.c + 1, b.r + 1]].map(([c, r]) => r * C.COLS + c);
+  const lotArea = new Set(blocks.filter(b => b.wasLot).flatMap(b => b.nodes));
+  for (const b of blocks) {
     const T = BLOCK_TYPES[b.type], bw = T.w;
-    b.nodes = [[b.c, b.r], [b.c + 1, b.r], [b.c, b.r + 1], [b.c + 1, b.r + 1]].map(([c, r]) => r * C.COLS + c);
     for (const id of b.nodes) {
       for (const a in bw) nodes[id].w[a] += bw[a] / 4;
-      nodes[id].cap += T.spaces * C.PARK_SCALE / 4;
+      const scale = b.type === 'lot' ? C.LOT_SCALE : C.PARK_SCALE * (lotArea.has(id) ? C.LOT_AREA_SCALE : 1);
+      nodes[id].cap += T.spaces * scale / 4;
       nodes[id].ownW = (nodes[id].ownW || 0) + (bw.home || 0) * T.own / 4;
     }
   }
   for (const n of nodes) {
     n.cap = Math.round(n.cap); n.parked = Math.round(n.cap * C.PARK_INIT_OCC);
-    n.own = n.w.home > 0 ? n.ownW / n.w.home : 0.5;                   // car ownership of people living here
-    const types = BLOCKS.filter(b => b.nodes.includes(n.id)).map(b => b.type);
+    n.own = (n.w.home > 0 ? n.ownW / n.w.home : 0.5) * (plan.ownMult ? plan.ownMult[n.id] : 1);  // car ownership of residents
+    const types = blocks.filter(b => b.nodes.includes(n.id)).map(b => b.type);
     n.parkPrice = types.length ? types.reduce((a, k) => a + C.PARK_PRICE[k], 0) / types.length : 0;
     n.waitEma = C.TAXI_WAIT_PRIOR; n.abEma = 0; n.searchEma = 0;       // what people here have recently experienced
   }
@@ -333,14 +352,14 @@ function createSim(params, plan) {
   function poisson(l) { const L = Math.exp(-l); let k = 0, p = 1; do { k++; p *= rng(); } while (p > L); return k - 1; }
 
   const sim = {
-    t: C.START, params, nodes, links, segs, blocks: BLOCKS, taxis: [], queue: [],
-    population: Math.round(BLOCKS.reduce((a, b) => a + (BLOCK_TYPES[b.type].w.home || 0), 0) * 900),
+    t: C.START, params, nodes, links, segs, blocks, taxis: [], queue: [],
+    population: Math.round(blocks.reduce((a, b) => a + (BLOCK_TYPES[b.type].w.home || 0), 0) * 900),
     dist: Array.from({ length: N }, () => new Float64Array(N)),
     stats: { carTrips: 0, carTimeSum: 0, taxiTrips: 0, taxiRideSum: 0, pickups: 0, waitSum: 0,
       abandoned: 0, dist: 0, taxiDist: 0, emptyDist: 0, vehSec: 0, curbStops: 0, bayStops: 0, rebalMoves: 0, requests: 0,
       byPurpose: Object.fromEntries(PURPOSES.map(p => [p.key, 0])),
       d2d: { car: [0, 0], taxi: [0, 0], transit: [0, 0] },            // door-to-door [seconds, trips] by final mode
-      cruises: 0, cruiseDist: 0, farParks: 0, ptTrips: 0, fbCar: 0, fbTransit: 0, pooledRiders: 0, poolJoins: 0 },
+      cruises: 0, cruiseDist: 0, farParks: 0, ptTrips: 0, fbCar: 0, fbTransit: 0, pooledRiders: 0, poolJoins: 0, searchSec: 0, searchN: 0 },
     win: { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 },
     series: [],
     setLanes(key, lanes) { setLanes(key, lanes); updateCosts(); },
@@ -455,7 +474,10 @@ function createSim(params, plan) {
       if (until * 60 < C.END) { if (!releases.has(until)) releases.set(until, []); releases.get(until).push(n.id); }
     }
     const d = nodes[v.dest], walk = (Math.abs(n.x - d.x) + Math.abs(n.y - d.y)) / C.WALK_SPEED;
-    if (!v.toHome) d.searchEma = 0.9 * d.searchEma + 0.1 * ((v.arriveT ? t - v.arriveT : 0) + walk + extraWalk);
+    if (!v.toHome) {
+      const search = (v.arriveT ? t - v.arriveT : 0) + walk + extraWalk;
+      d.searchEma = 0.9 * d.searchEma + 0.1 * search; S.searchSec += search; S.searchN++;
+    }
     S.carTrips++; S.carTimeSum += t - v.t0;
     finishTrip('car', v.t0, t, C.WALK_END + walk + extraWalk);
   }
@@ -547,6 +569,7 @@ function createSim(params, plan) {
       S.byPurpose[purpose]++;
       const trip = { o, d, purpose, toHome: leg.toHome, hasCar: rng() < nodes[leg.homeAtDest ? d : o].own };
       const mode = chooseMode(trip);
+      nodes[o].modes[mode]++;
       if (mode === 'taxi') startTaxi(trip, t);
       else if (mode === 'car') startCar(trip, t);
       else startTransit(trip, t, t);
@@ -566,7 +589,7 @@ function createSim(params, plan) {
       const pool = params.pool ? 1 : 0;
       const time = o.waitEma + 2 * C.DWELL + drive * (pool ? C.POOL_TIME : 1) + C.WALK_END;
       const fare = (C.FARE_BASE + km * params.fare) * (pool ? 1 - C.POOL_DISCOUNT : 1);
-      out.taxi = (time / 60) * C.VOT + fare + o.abEma * C.ABANDON_PENALTY + C.ASC_TAXI;
+      out.taxi = (time / 60) * C.VOT + fare + o.abEma * C.ABANDON_PENALTY + C.ASC_TAXI + (params.taxiAsc || 0);
     }
     return out;
   }
@@ -663,6 +686,24 @@ function createSim(params, plan) {
     }
   }
 
+  // Parking demand around each (former) surface lot: cars parked at its four corners plus cars circling toward them.
+  for (const b of blocks) if (b.wasLot) b.peak = 0;
+  function sampleLots() {
+    const circling = new Float64Array(N);
+    for (const L of links) for (const v of L.q) if (v.kind === 'car' && v.cruise) circling[v.dest]++;
+    for (const b of blocks) {
+      if (!b.wasLot) continue;
+      const now = b.nodes.reduce((a, id) => a + nodes[id].parked + circling[id], 0);
+      if (now > b.peak) b.peak = now;
+    }
+  }
+  sim.lotStats = function () {
+    return blocks.filter(b => b.wasLot).map(b => {
+      const supply = b.nodes.reduce((a, id) => a + nodes[id].cap, 0);
+      const own = b.type === 'lot' ? Math.round(BLOCK_TYPES.lot.spaces * C.LOT_SCALE) : 0;
+      return { name: b.name, converted: b.type !== 'lot', demand: b.peak, supply, supplyAfter: supply - own };
+    });
+  };
   sim.step = function () {
     const t = sim.t;
     if (t >= C.END) return false;
@@ -682,6 +723,7 @@ function createSim(params, plan) {
       sim.series.push({ t: sim.t, speed: w.vehSec ? w.dist / w.vehSec * 3.6 : null,
         wait: w.pickups ? w.waitSum / w.pickups / 60 : null, onNet: on, waiting: sim.queue.length });
       for (const L of links) { L.flow = L.exitCount * 3600 / C.SAMPLE_EVERY; L.exitCount = 0; }
+      sampleLots();
       sim.win = { dist: 0, vehSec: 0, waitSum: 0, pickups: 0 };
     }
     return true;
@@ -705,11 +747,85 @@ function createSim(params, plan) {
       emptyPct: S.taxiDist ? S.emptyDist / S.taxiDist * 100 : 0,
       vkt: S.dist / 1000,
       cruiseKm: S.cruiseDist / 1000,
+      searchMin: S.searchN ? S.searchSec / S.searchN / 60 : 0,
       curbStops: S.curbStops,
     };
   };
   updateCosts();
   return sim;
+}
+// ---- campaign: 2028-2036, one representative day per year ----
+// Between years the player spends influence converting surface lots into parks. Converting
+// too early starves drivers of parking; too late wastes the years a park would have paid off.
+const CAMPAIGN = {
+  START_YEAR: 2028, YEARS: 9,
+  TRUST0: 5, TRUST_STEP: 1,               // robotaxi novelty penalty (yuan), shrinking every year
+  SELL_RATE: 0.06, SELL_REF: 0.3,         // car ownership falls SELL_RATE/yr where robotaxi share is SELL_REF
+  INFLUENCE0: 15, CONVERT_COST: 12, INFLUENCE_PER_SAT: 0.5, SAT_FLOOR: 35,
+  OVERFLOW_PENALTY: 150,                  // parking points lost per 100% shortfall around a lot
+  // Tearing out a lot that is still busy angers drivers. Usage = last year's peak demand / spaces left after.
+  BACKLASH_FROM: 0.85, BACKLASH_INFLUENCE: 40, BACKLASH_ANGER: 120, ANGER_DECAY: 0.5,
+  SAT_W: { travel: 0.35, parking: 0.3, green: 0.25, curb: 0.1 },
+};
+function createCampaign() {
+  return { year: 0, influence: CAMPAIGN.INFLUENCE0, converted: new Set(), convertedIn: {},
+    ownMult: new Array(CFG.COLS * CFG.ROWS).fill(1), history: [], anger: 0, done: false };
+}
+function campaignYear(camp) { return CAMPAIGN.START_YEAR + camp.year; }
+function campaignParams(camp) { return { taxiAsc: Math.max(0, CAMPAIGN.TRUST0 - CAMPAIGN.TRUST_STEP * camp.year) }; }
+function campaignPlan(camp, plan) { return { ...plan, converted: camp.converted, ownMult: camp.ownMult }; }
+function satisfactionOf(sim, camp) {
+  const s = sim.summary(), clamp = v => Math.max(0, Math.min(100, v));
+  const parts = {
+    travel: clamp(100 - 6 * (s.d2d - 7)),                  // door-to-door minutes
+    // drivers: citywide search time, plus complaints wherever peak demand around a lot exceeds its supply
+    parking: clamp(100 - 15 * s.searchMin - CAMPAIGN.OVERFLOW_PENALTY *
+      sim.lotStats().reduce((a, l) => a + Math.max(0, l.demand / l.supply - 1), 0) - camp.anger),
+    green: clamp(30 + 14 * camp.converted.size),           // residents: new parks
+    curb: clamp(100 - s.curbStops / 800),                  // everyone: robotaxis blocking lanes
+  };
+  const total = Object.entries(CAMPAIGN.SAT_W).reduce((a, [k, w]) => a + w * parts[k], 0);
+  return { parts, total };
+}
+function closeYear(camp, sim) {
+  const sat = satisfactionOf(sim, camp);
+  const gain = Math.max(0, Math.round((sat.total - CAMPAIGN.SAT_FLOOR) * CAMPAIGN.INFLUENCE_PER_SAT));
+  camp.history.push({ year: campaignYear(camp), sat, gain, lots: sim.lotStats(), summary: sim.summary(), converted: [...camp.converted] });
+  camp.influence += gain;
+  for (const n of sim.nodes) {                             // residents sell cars where robotaxis serve them
+    const m = n.modes, tot = m.car + m.taxi + m.transit;
+    if (tot) camp.ownMult[n.id] *= 1 - CAMPAIGN.SELL_RATE * Math.min(1.5, m.taxi / tot / CAMPAIGN.SELL_REF);
+  }
+  camp.anger *= CAMPAIGN.ANGER_DECAY;
+  camp.year++;
+  camp.done = camp.year >= CAMPAIGN.YEARS;
+}
+// What converting a lot would cost now, judged on last year's usage. Proposals need a year of data.
+function conversionQuote(camp, name) {
+  const o = lotOutlook(camp, name);
+  if (!o || o.converted) return null;
+  const usage = o.supplyAfter > 0 ? o.demand / o.supplyAfter : 9;
+  const backlash = Math.max(0, usage - CAMPAIGN.BACKLASH_FROM);
+  return { usage, backlash, cost: Math.round(CAMPAIGN.CONVERT_COST + CAMPAIGN.BACKLASH_INFLUENCE * backlash),
+    anger: Math.round(CAMPAIGN.BACKLASH_ANGER * backlash) };
+}
+function convertLot(camp, name) {
+  const q = conversionQuote(camp, name);
+  if (camp.done || !q || camp.influence < q.cost) return false;
+  camp.influence -= q.cost; camp.anger += q.anger;
+  camp.converted.add(name); camp.convertedIn[name] = campaignYear(camp);
+  return true;
+}
+// Last year's peak demand around a lot, and a naive trend forecast for next year.
+function lotOutlook(camp, name) {
+  const h = camp.history.map(y => y.lots.find(l => l.name === name));
+  if (!h.length) return null;
+  const last = h[h.length - 1], prev = h[h.length - 2];
+  return { ...last, next: Math.max(0, prev ? 2 * last.demand - prev.demand : last.demand), series: h.map(l => l.demand) };
+}
+function campaignScore(camp) {
+  const sats = camp.history.map(y => y.sat.total);
+  return sats.length ? sats.reduce((a, b) => a + b, 0) / sats.length : 0;
 }
 </script>
 
@@ -722,9 +838,14 @@ const chart = $('chart'), cctx = chart.getContext('2d');
 const plan = { lanes: {}, bays: new Set() };
 const params = { seed: 42, fleet: 350, demand: 1, rebalance: 0.6, event: true, fare: 2, pool: false, poolDetour: 1.4, taxiOn: true };
 let sim, prevSummary = null, speed = 60, running = true, tool = 'inspect', lens = 'state', acc = 0, last = performance.now();
+let camp = createCampaign(), ff = false;
 let view = { s: 1, ox: 0, oy: 0, dpr: 1 }, mouse = null;
 
-function newDay() { sim = createSim({ ...params }, plan); acc = 0; cityShown = -1; $('banner').style.display = 'none'; }
+// Each campaign year is one representative day; conversions so far and residents' car ownership carry over.
+function newDay() {
+  sim = createSim({ ...params, ...campaignParams(camp) }, campaignPlan(camp, plan));
+  acc = 0; ff = false; cityShown = -1; $('report').style.display = 'none';
+}
 
 // ---- controls ----
 function bindSlider(id, key, fmt) {
@@ -766,7 +887,9 @@ document.querySelectorAll('[data-tool]').forEach(b => b.onclick = () => {
   tool = b.dataset.tool; document.querySelectorAll('[data-tool]').forEach(x => x.classList.toggle('on', x === b));
   $('toolHint').textContent = hints[tool];
 });
-$('reset').onclick = () => { if (sim.t > CFG.START + 1800) prevSummary = sim.summary(); newDay(); running = true; $('play').textContent = '暂停'; };
+$('reset').onclick = () => { newDay(); running = true; $('play').textContent = '暂停'; };
+$('ff').onclick = () => { ff = true; running = true; $('play').textContent = '暂停'; };
+$('restartCamp').onclick = () => { camp = createCampaign(); prevSummary = null; newDay(); running = true; $('play').textContent = '暂停'; };
 $('clearPlan').onclick = () => {
   for (const key in plan.lanes) sim.setLanes(key, sim.links[sim.segs[key][0]].defLanes);
   plan.lanes = {}; for (const id of plan.bays) sim.setBay(id, false); plan.bays.clear(); updateBayCount();
@@ -841,7 +964,14 @@ function drawBlocks(W, H, sp) {
   for (const b of sim.blocks) {
     const T = BLOCK_TYPES[b.type], { x, y, s } = blockRect(b);
     ctx.fillStyle = T.fill; ctx.fillRect(x, y, s, s);
-    if (b.type === 'park') {
+    if (b.type === 'lot') {                                           // painted stalls + how full the corners are
+      ctx.strokeStyle = '#6b7079'; ctx.lineWidth = 1;
+      for (let i = 1; i < 6; i++) { const lx = x + s * i / 6; ctx.beginPath(); ctx.moveTo(lx, y + s * 0.12); ctx.lineTo(lx, y + s * 0.3); ctx.moveTo(lx, y + s * 0.62); ctx.lineTo(lx, y + s * 0.8); ctx.stroke(); }
+      const ns = b.nodes.map(id => sim.nodes[id]), full = Math.min(1, ns.reduce((a, n) => a + n.parked, 0) / Math.max(1, ns.reduce((a, n) => a + n.cap, 0)));
+      ctx.fillStyle = '#20242a'; ctx.fillRect(x + 6, y + 6, s - 12, 5);
+      ctx.fillStyle = full > 0.95 ? '#ff6b6b' : full > 0.8 ? '#f2b134' : '#8b96a3'; ctx.fillRect(x + 6, y + 6, (s - 12) * full, 5);
+    }
+    if (b.type === 'park' || b.type === 'greened') {
       ctx.fillStyle = '#2f7a3f';
       for (const [fx, fy] of [[0.25, 0.3], [0.7, 0.25], [0.5, 0.55], [0.2, 0.7], [0.78, 0.68]]) { ctx.beginPath(); ctx.arc(x + s * fx, y + s * fy, s * 0.09, 0, 7); ctx.fill(); }
     }
@@ -856,7 +986,7 @@ function drawBlocks(W, H, sp) {
       ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x + 4, y + s - 19, s - 8, 15);
       ctx.fillStyle = '#e9edf2'; ctx.font = '600 11px system-ui,"PingFang SC","Microsoft YaHei",sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(b.name, x + s / 2, y + s - 11.5);
+      ctx.fillText(b.type === 'greened' ? b.name.replace('停车场', '公园') : b.name, x + s / 2, y + s - 11.5);
     }
   }
 }
@@ -943,6 +1073,7 @@ function drawPanel() {
   const busy = sim.taxis.filter(v => v.state !== 'idle').length;
   $('clockSub').textContent = `路上 ${sim.onNet || 0} 辆 · 候车 ${sim.nodes.reduce((a, n) => a + n.waiting.length, 0)} 人 · 车队忙碌 ${busy}/${sim.taxis.length}`;
   $('phase').textContent = phaseText(sim.t / 3600);
+  drawCamp();
   drawCity();
   const s = sim.summary(), p = prevSummary;
   const rows = [
@@ -957,7 +1088,7 @@ function drawPanel() {
     ['总车公里', x => x.vkt.toFixed(0)],
     ['路边占道停靠', x => x.curbStops.toFixed(0)],
   ];
-  $('kpi').innerHTML = '<tr><th></th><th>本局</th><th>上局</th></tr>' +
+  $('kpi').innerHTML = '<tr><th></th><th>今年</th><th>去年</th></tr>' +
     rows.map(([name, f]) => `<tr><td>${name}</td><td>${f(s)}</td><td>${p ? f(p) : '—'}</td></tr>`).join('') +
     '<tr><td colspan="3" class="hint" style="text-align:left">门到门 = 出门到抵达目的地的总时间（含步行、候车、找车位），是判断 Robotaxi 好坏的主指标，越低越好。</td></tr>';
 }
@@ -975,6 +1106,10 @@ function phaseText(h) {
   return '深夜：夜生活返程';
 }
 let cityShown = -1;
+function ownRate(sm) {
+  const h = sm.nodes.reduce((a, n) => a + n.w.home, 0);
+  return (sm.nodes.reduce((a, n) => a + n.own * n.w.home, 0) / h * 100).toFixed(0);
+}
 function drawCity() {
   if (sim.t === cityShown) return;                                   // only when the sim has advanced
   cityShown = sim.t;
@@ -984,6 +1119,7 @@ function drawCity() {
     `<div class="row hint">人口（按住宅估算）<b style="color:var(--text);margin-left:auto">${sim.population.toLocaleString()}</b></div>` +
     `<div class="row hint">市民自己选的出行方式：私家车 ${pct(D.car[1])} · Robotaxi ${pct(D.taxi[1])} · 公交 ${pct(D.transit[1])}</div>` +
     (S.abandoned ? `<div class="row hint">叫不到车改用其他方式：${S.abandoned} 人（开车 ${S.fbCar}，公交 ${S.fbTransit}）</div>` : '') +
+    `<div class="row hint">私家车拥有率（按居民）：${ownRate(sim)}%${camp.history.length ? `（2028 年 ${camp.history[0].own}%）` : ''}</div>` +
     `<div class="hint" style="margin:6px 0 2px">今日出行目的（共 ${total.toLocaleString()} 次）</div>` +
     `<div class="bars">${PURPOSES.map(p => {
       const v = S.byPurpose[p.key];
@@ -1025,6 +1161,12 @@ function nearestLink(mx, my) {
     if (d < bd) { bd = d; best = L; }
   }
   return best;
+}
+function lotTip(B) {
+  if (!B.wasLot) return '';
+  if (B.type === 'greened') return `<br><span class="ok">${camp.convertedIn[B.name]} 年由停车场改成公园</span>`;
+  const o = lotOutlook(camp, B.name);
+  return o ? `<br>去年高峰需求 ${o.demand} 辆 · 改造后剩 ${o.supplyAfter} 个车位（年度报告里可以改造）` : '<br>第一年结束后才有使用数据，才能提出改造';
 }
 function blockAt(mx, my) {
   return sim.blocks.find(b => { const { x, y, s } = blockRect(b); return mx >= x && mx <= x + s && my >= y && my <= y + s; });
@@ -1071,7 +1213,7 @@ canvas.addEventListener('mousemove', e => {
       (B.group ? ` · <span style="color:${GROUPS[B.group][0]}">${GROUPS[B.group][1]}片区</span>` : ' · 地标') + '<br>' +
       `四角路口候车 ${wait} 人 · 预测叫车 ${dem.toFixed(1)} / 15 分钟<br>` +
       `周边停车位 ${parked} / ${cap}${parked >= cap ? ' <b style="color:#ff7eb6">已满</b>' : ''} · 停车费约 ${price.toFixed(0)} 元<br>` +
-      `这里的人最近叫车平均等 ${taxiWait.toFixed(1)} 分钟`;
+      `这里的人最近叫车平均等 ${taxiWait.toFixed(1)} 分钟` + lotTip(B);
   }
   tip.style.display = 'block';
   tip.style.left = Math.min(mouse.x + 14, r.width - tip.offsetWidth - 6) + 'px';
@@ -1098,14 +1240,74 @@ function frame(now) {
   if (running) {
     acc += dt * speed;
     let steps = Math.floor(acc); acc -= steps;
+    if (ff) { steps = 4000; acc = 0; }
     while (steps-- > 0) {
-      if (!sim.step()) { running = false; $('play').textContent = '继续'; $('banner').style.display = 'block'; acc = 0; break; }
+      if (!sim.step()) { running = false; $('play').textContent = '继续'; acc = 0; endYear(); break; }
     }
   }
   draw(running && speed <= 10 ? acc : 0);
   drawPanel(); drawChart();
   requestAnimationFrame(frame);
 }
+// ---- campaign UI ----
+function drawCamp() {
+  const last = camp.history.at(-1);
+  $('camp').innerHTML = `<span><b>${camp.done ? '战役结束' : campaignYear(camp) + ' 年'}</b> 第 ${Math.min(camp.year + 1, CAMPAIGN.YEARS)}/${CAMPAIGN.YEARS} 年</span>` +
+    `<span>政策影响力 <b>${camp.influence}</b></span>` +
+    `<span>上年满意度 <b>${last ? last.sat.total.toFixed(0) : '—'}</b></span>` +
+    `<span>新公园 <b>${camp.converted.size}</b>/5</span>`;
+}
+function endYear() {
+  ff = false;
+  closeYear(camp, sim);
+  camp.history.at(-1).own = camp.history.length === 1 ? ownRate(sim) : camp.history[0].own;
+  showReport();
+}
+function spark(series, supply, after) {
+  const W = 130, H = 38, max = Math.max(supply, ...series, 1) * 1.08;
+  const x = i => 4 + i * (W - 8) / (CAMPAIGN.YEARS - 1), y = v => H - 3 - v / max * (H - 6);
+  const pts = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  return `<svg width="${W}" height="${H}" style="display:block">` +
+    `<line x1="2" x2="${W - 2}" y1="${y(supply)}" y2="${y(supply)}" stroke="#8b96a3" stroke-width="1"/>` +
+    `<line x1="2" x2="${W - 2}" y1="${y(after)}" y2="${y(after)}" stroke="#5fd38d" stroke-width="1.5" stroke-dasharray="4 3"/>` +
+    `<polyline points="${pts}" fill="none" stroke="#f2b134" stroke-width="2"/>` +
+    series.map((v, i) => `<circle cx="${x(i)}" cy="${y(v)}" r="2.2" fill="#f2b134"/>`).join('') + `</svg>`;
+}
+const PART_NAMES = { travel: '出行（门到门）', parking: '停车（司机）', green: '绿地（居民）', curb: '路边占道' };
+function showReport() {
+  const y = camp.history.at(-1), S = y.summary;
+  const bars = Object.entries(y.sat.parts).map(([k, v]) =>
+    `<div><span>${PART_NAMES[k]}</span><b style="width:${v.toFixed(0)}%;background:${v >= 70 ? '#5fd38d' : v >= 45 ? '#f2b134' : '#ff6b6b'}"></b><span>${v.toFixed(0)}</span></div>`).join('');
+  const lots = BLOCKS.filter(b => b.type === 'lot').map(b => {
+    const o = lotOutlook(camp, b.name), q = conversionQuote(camp, b.name);
+    if (o.converted) return `<tr><td>🌳 ${b.name.replace('停车场', '公园')}</td><td colspan="3" class="ok">${camp.convertedIn[b.name]} 年改成公园</td><td>${spark(o.series, o.supply, o.supplyAfter)}</td><td></td></tr>`;
+    const cls = q.usage < CAMPAIGN.BACKLASH_FROM ? 'ok' : q.usage < 1.1 ? 'warn' : 'bad';
+    const mood = cls === 'ok' ? '司机不太在意' : cls === 'warn' ? '有反对声' : '司机强烈反对';
+    const can = !camp.done && camp.influence >= q.cost;
+    return `<tr><td>🅿️ ${b.name}</td><td>${o.demand} / ${o.supply}</td><td>${o.supplyAfter}</td>` +
+      `<td class="${cls}">${(q.usage * 100).toFixed(0)}% · ${mood}</td><td>${spark(o.series, o.supply, o.supplyAfter)}</td>` +
+      `<td>${camp.done ? '' : `<button data-convert="${b.name}" ${can ? '' : 'disabled'}>改成公园 −${q.cost} 影响力${q.anger ? ` · 民怨 +${q.anger}` : ''}</button>`}</td></tr>`;
+  }).join('');
+  const final = camp.done ? `<h3>战役结束</h3><div>九年平均满意度 <span class="big">${campaignScore(camp).toFixed(1)}</span></div>
+      <div class="hint">改造时间：${Object.entries(camp.convertedIn).map(([n, yr]) => `${n.replace('停车场', '')} ${yr}`).join('，') || '一个也没改'}</div>
+      <div class="row" style="margin-top:10px"><button class="go" id="again">再玩一局（2028）</button></div>`
+    : `<div class="row" style="margin-top:12px"><button class="go" id="next">进入 ${campaignYear(camp)} 年 ▶</button>
+       <span class="hint">停车需求会随着市民卖掉私家车逐年下降；改造在下一年生效。</span></div>`;
+  $('report').innerHTML = `<h2>${y.year} 年度报告</h2>
+    <div class="row hint">满意度 <span class="big" style="color:var(--text)">${y.sat.total.toFixed(0)}</span>
+      政策影响力 +${y.gain} → <b style="color:var(--text)">${camp.influence}</b>${camp.anger >= 1 ? ` · 司机民怨 ${camp.anger.toFixed(0)}（每年减半）` : ''}</div>
+    <div class="bars" style="max-width:420px">${bars}</div>
+    <div class="hint">门到门 ${S.d2d.toFixed(1)} 分钟 · 找车位 ${S.searchMin.toFixed(1)} 分钟 · 出行方式 车/Robotaxi/公交 ${S.shareCar.toFixed(0)}/${S.shareTaxi.toFixed(0)}/${S.shareTransit.toFixed(0)}%</div>
+    <h3>地面停车场：高峰需求 vs 车位</h3>
+    <table><tr><th>停车场</th><th>高峰需求 / 现有车位</th><th>改造后车位</th><th>改造后使用率</th><th>历年需求 <span class="hint">（橙）· 现有（灰）· 改造后（绿虚线）</span></th><th></th></tr>${lots}</table>
+    <div class="hint">使用率 = 去年高峰需求 ÷ 改造后剩下的车位。低于 ${CAMPAIGN.BACKLASH_FROM * 100}% 改造几乎没有反对；越高，花的影响力越多，司机的民怨也越大。</div>
+    ${final}`;
+  $('report').style.display = 'block';
+  $('report').querySelectorAll('[data-convert]').forEach(btn => btn.onclick = () => { convertLot(camp, btn.dataset.convert); showReport(); });
+  const nx = $('next'); if (nx) nx.onclick = () => { prevSummary = camp.history.at(-1).summary; newDay(); running = true; $('play').textContent = '暂停'; };
+  const ag = $('again'); if (ag) ag.onclick = () => $('restartCamp').onclick();
+}
+
 newDay(); resize(); updateBayCount();
 requestAnimationFrame(frame);
 </script>
