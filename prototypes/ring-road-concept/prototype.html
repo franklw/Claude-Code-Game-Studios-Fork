@@ -2,6 +2,8 @@
   PROTOTYPE - NOT FOR PRODUCTION
   Question: 玩家调 CyberCab 的设定速度 U、切换控制模式，能否获得“一辆车让整个环路安静下来”的满足感？
             信号：3 分钟内找到最优 U（全环路车速标准差 < 1.0 m/s 且吞吐量不低于有波时），并主动重来或尝试其他模式。
+  Variant A（你来开）: 玩家亲手用油门/刹车驾驶 CyberCab 吸收停走波，是否是一种可以练习、会越玩越好的技巧？
+            信号：同一组司机连续挑战 3 次，成绩（全环路车速标准差）逐次变好，并且玩家想再来一次或想赢过算法。
   Date: 2026-11-08
   Source: Stern et al., "Dissipation of stop-and-go waves via control of autonomous vehicles: Field experiments",
           Transportation Research Part C 89 (2018), arXiv:1705.01693
@@ -62,6 +64,19 @@
   tr.cur td { color: var(--accent); }
   tr.good td:last-child { color: var(--ok); }
   .right { display: grid; gap: 12px; min-width: 0; }
+  #drive { display: none; margin-top: 8px; }
+  #ahead { aspect-ratio: 400 / 150; background: #070b17; border-radius: 6px; }
+  .pedals { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .pedal { padding: 16px 8px; font: 600 16px/1 inherit; border-radius: 10px; border: 2px solid var(--line);
+    background: #1b2542; color: var(--text); user-select: none; -webkit-user-select: none; touch-action: none; cursor: pointer; }
+  .pedal.gas.down { background: #065f46; border-color: var(--ok); }
+  .pedal.brk.down { background: #7f1d1d; border-color: #ef4444; }
+  .keys { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .btn.primary { background: var(--cc); border-color: var(--cc); color: #fff; font-weight: 600; }
+  #chStatus { color: var(--muted); font-size: 13px; margin: 0 0 6px; }
+  #chStatus b { color: var(--text); }
+  tr.win td:last-child { color: var(--ok); }
+  tr.slow td:last-child { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -79,11 +94,20 @@
       <button data-m="human" class="on">人类驾驶</button>
       <button data-m="fs">FollowerStopper</button>
       <button data-m="pi">PI 饱和控制</button>
+      <button data-m="manual">你来开</button>
     </div>
     <div class="hint" id="modeHint"></div>
     <div id="uBox" class="dis">
       <div class="ulab"><span>设定速度 U</span><span><b id="uVal">7.0</b> m/s · <span id="uKmh">25.2</span> km/h</span></div>
       <input id="u" type="range" min="4" max="8" step="0.1" value="7.0">
+    </div>
+    <div id="drive">
+      <canvas id="ahead" width="800" height="300"></canvas>
+      <div class="pedals"><button class="pedal brk" id="pBrk">刹车</button><button class="pedal gas" id="pGas">油门</button></div>
+      <div class="keys">键盘：↑ / W 油门 · ↓ / S 刹车 · 都不按 = 滑行（缓慢减速）。踏板是渐进的：轻点 = 轻踩。</div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="chStart">开始挑战：你来开 120 秒</button>
     </div>
 
     <div class="row" style="margin-top:10px">
@@ -99,6 +123,16 @@
   </section>
 
   <div class="right">
+    <section class="panel" id="chPanel">
+      <h2>挑战：你 vs 算法</h2>
+      <p id="chStatus">点「开始挑战」：先让人类车流跑 120 秒，自然形成停走波；然后由你接管红色 CyberCab，亲手开 120 秒。
+        <b>成绩 = 这 120 秒里全环路车速标准差 σ（越低越好）</b>，吞吐量不能低于“人类驾驶”基准的 98%（不能靠全体龟速取巧）。
+        同一组司机下，你的成绩会和“CyberCab 继续当人类司机”以及“FollowerStopper 最佳设定”对比。</p>
+      <div class="tablewrap"><table>
+        <thead><tr><th>#</th><th>司机组</th><th>你的 σ</th><th>你的吞吐</th><th>人类基准 σ</th><th>算法最佳 σ</th><th>AEB</th><th>评价</th></tr></thead>
+        <tbody id="chLog"></tbody>
+      </table></div>
+    </section>
     <section class="panel">
       <h2>时空轨迹图 — 横轴：最近 180 秒；纵轴：环路位置 0–260 m。斜向的橙色条纹就是向后传播的停走波</h2>
       <canvas id="ts" width="900" height="300"></canvas>
@@ -151,7 +185,8 @@ function newSim(sd) {
   for (let i = 0; i < N; i++) cars.push({ x: i*L/N, v: 0, a: 0, len: LENS[i], amax: HP.a + (rnd()-0.5)*HP.aspread,
     eps: 0, brakeTimer: 0, braking: false, flash: 0, av: i === N-1 });
   S = { cars, rnd, gauss, t: 0, steps: 0, mode: 'human', U: +uEl.value, pi: { hist: [], vcmd: 0, U: 0 },
-        cumFuel: 0, cumDist: 0, cumBrakes: 0, collisions: 0 };
+        cumFuel: 0, cumDist: 0, cumBrakes: 0, collisions: 0,
+        pedal: 0, pp: 0, aeb: 0, aebOn: false, headless: false, onSample: null };
 }
 function gapOf(i) { const c = S.cars[i], l = S.cars[(i+1)%N]; let g = l.x - c.x; if (g <= 0) g += L; return g - l.len; }
 
@@ -186,7 +221,18 @@ function stepSim() {
   for (let i = 0; i < N; i++) {
     const c = cars[i], l = cars[(i+1)%N], g = gapOf(i);
     let a;
-    if (c.av && S.mode !== 'human') {
+    if (c.av && S.mode === 'manual') {
+      // progressive pedal: position moves toward the pressed target at 3 /s, so a short tap = a light press
+      const rate = 3.0*DT; S.pp += Math.max(-rate, Math.min(rate, S.pedal - S.pp));
+      a = S.pp > 0 ? S.pp*1.5*(1 - c.v/12) - 0.3*(1 - S.pp) : S.pp < 0 ? S.pp*3.0 - 0.3 : -0.3;   // coast ≈ −0.3 m/s²
+      // automatic emergency braking — keeps the car from rear-ending, but every engagement is counted against you
+      const need = c.v > l.v ? (c.v - l.v)*(c.v - l.v)/(2*Math.max(g - 1.5, 0.2)) : 0;
+      if (g < 2.5 || need > 3.0) {
+        a = Math.min(a, -need - 0.5, -1);
+        if (!S.aebOn) { S.aebOn = true; S.aeb++; c.flash = 1.2; if (!S.headless) mark('AEB', '#f59e0b'); }
+      } else S.aebOn = false;
+      a = Math.max(-6, a);
+    } else if (c.av && S.mode !== 'human') {
       const vcmd = S.mode === 'fs' ? followerStopper(g, c.v, l.v, S.U) : piSaturation(g, c.v, l.v);
       const e = vcmd - c.v, tau = e <= -0.25 ? 0.36 : 0.73;     // low-level: brake mode faster than throttle mode (paper §3.3)
       a = Math.max(-4, Math.min(1.5, e/tau));
@@ -216,7 +262,7 @@ function stepSim() {
     c.x = (l.x - l.len - 0.3 + L) % L; c.v = Math.min(c.v, l.v);
   }
   S.t += DT; S.steps++;
-  if (S.steps % SAMPLE_EVERY === 0) takeSample();
+  if (S.steps % SAMPLE_EVERY === 0) { if (S.headless) S.onSample && S.onSample(); else takeSample(); }
 }
 
 // ---------------- samples, metrics, interval log ----------------
@@ -243,6 +289,10 @@ function takeSample() {
     waveSeenInRow = true; mark('停走波', '#f59e0b'); splitInterval('人类驾驶（停走波出现）', true);
   }
   if (total % 5 === 0) checkGoal();                  // once per simulated second, independent of frame rate
+  if (CH.state === 'running') {
+    CH.sumV += s; CH.sumV2 += s2; CH.cnt += N;
+    if (S.t - CH.t0 >= CH_DUR - 1e-6) finishChallenge();
+  }
   drawTsColumn();
 }
 function checkGoal() {
@@ -302,19 +352,27 @@ const uEl = $('u');
 const HINTS = {
   human: '像其他司机一样开：拼命追前车、不留缓冲。它自己也会参与制造停走波。',
   fs: 'FollowerStopper：按设定速度 U 巡航；车距不够时按三条安全曲线减速到前车速度或停车。U 需要你来给定。',
-  pi: 'PI 饱和控制：自己估算过去 38 秒（约一圈）的平均车速并按它行驶；车近时跟前车，车远时最多快 1 m/s 去追。不需要外部输入。'
+  pi: 'PI 饱和控制：自己估算过去 38 秒（约一圈）的平均车速并按它行驶；车近时跟前车，车远时最多快 1 m/s 去追。不需要外部输入。',
+  manual: '你来开：用油门/刹车亲手驾驶 CyberCab（自动切到 1× 实时）。你能看到整个环路，算法只能看到前车——提前读出前方的波，留出缓冲。'
 };
 function modeLabel() {
-  return S.mode === 'human' ? '人类驾驶' : S.mode === 'fs' ? `FollowerStopper U=${S.U.toFixed(1)}` : 'PI 饱和控制';
+  return { human: '人类驾驶', fs: `FollowerStopper U=${S.U.toFixed(1)}`, pi: 'PI 饱和控制', manual: '你来开' }[S.mode];
 }
-function setMode(m) {
-  if (m === S.mode) return;
-  S.mode = m;
-  if (m === 'pi') S.pi.vcmd = S.cars[N-1].v;
-  if (m !== 'human' && firstControlT === null) firstControlT = S.t;
+function applyModeUI(m) {
   document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
   $('uBox').classList.toggle('dis', m !== 'fs');
+  $('uBox').style.display = m === 'manual' ? 'none' : 'block';
+  $('drive').style.display = m === 'manual' ? 'block' : 'none';
   $('modeHint').textContent = HINTS[m];
+}
+function setMode(m, fromChallenge) {
+  if (m === S.mode) return;
+  if (!fromChallenge && CH.state !== 'idle' && CH.state !== 'done') abortChallenge();
+  S.mode = m;
+  if (m === 'pi') S.pi.vcmd = S.cars[N-1].v;
+  if (m === 'manual') { S.pp = 0; S.pedal = pedalTarget(); setSimSpeed(1); }
+  if (m !== 'human' && firstControlT === null) firstControlT = S.t;
+  applyModeUI(m);
   mark(modeLabel(), m === 'human' ? '#8b97b3' : '#ff2d55');
   splitInterval(modeLabel());
 }
@@ -323,25 +381,117 @@ function showU() { $('uVal').textContent = (+uEl.value).toFixed(1); $('uKmh').te
 uEl.oninput = () => { S.U = +uEl.value; showU(); };
 uEl.onchange = () => { S.U = +uEl.value; showU(); if (S.mode === 'fs') { mark('U=' + S.U.toFixed(1), '#ff2d55'); splitInterval(modeLabel()); } };
 let simSpeed = 2, paused = false;
-document.querySelectorAll('#speeds button').forEach(b => b.onclick = () => {
-  simSpeed = +b.dataset.s; document.querySelectorAll('#speeds button').forEach(x => x.classList.toggle('on', x === b));
-});
-$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? '继续' : '暂停'; };
+function setSimSpeed(s) {
+  simSpeed = s; document.querySelectorAll('#speeds button').forEach(x => x.classList.toggle('on', +x.dataset.s === s));
+}
+function setPaused(p) { paused = p; $('pause').textContent = paused ? '继续' : '暂停'; }
+document.querySelectorAll('#speeds button').forEach(b => b.onclick = () => setSimSpeed(+b.dataset.s));
+$('pause').onclick = () => { if (CH.state === 'ready') return; setPaused(!paused); };
 $('brake').onclick = () => {
   const cand = S.cars.filter(c => !c.av && c.v > 2);
   const c = (cand.length ? cand : S.cars.filter(c => !c.av))[Math.floor(S.rnd()*(cand.length || N-1))];
   c.brakeTimer = 1.5; c.flash = 3; mark('急刹', '#e6ebf5');
 };
 function restart() {
-  newSim(seed); setModeSilently('human'); resetRecords(); renderLog();
+  newSim(seed); S.mode = 'human'; applyModeUI('human'); resetRecords(); renderLog(); setPaused(false);
 }
-function setModeSilently(m) {
-  S.mode = m;
-  document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
-  $('uBox').classList.toggle('dis', m !== 'fs'); $('modeHint').textContent = HINTS[m];
+$('reset').onclick = () => { if (CH.state !== 'idle' && CH.state !== 'done') abortChallenge(); restart(); };
+$('reseed').onclick = () => { if (CH.state !== 'idle' && CH.state !== 'done') abortChallenge(); seed = Math.floor(Math.random()*1e6) + 2; restart(); };
+
+// ---------------- pedals (keyboard + touch) ----------------
+const keys = { gas: false, brk: false }, ptr = { gas: false, brk: false };
+function pedalTarget() { return (keys.brk || ptr.brk) ? -1 : (keys.gas || ptr.gas) ? 1 : 0; }
+function pedalChanged() {
+  $('pGas').classList.toggle('down', keys.gas || ptr.gas); $('pBrk').classList.toggle('down', keys.brk || ptr.brk);
+  if (S.mode !== 'manual') return;
+  S.pedal = pedalTarget();
+  if (CH.state === 'ready' && S.pedal !== 0) beginChallengeDrive();
 }
-$('reset').onclick = restart;
-$('reseed').onclick = () => { seed = Math.floor(Math.random()*1e6) + 2; restart(); };
+const KEYMAP = { ArrowUp: 'gas', w: 'gas', W: 'gas', ArrowDown: 'brk', s: 'brk', S: 'brk' };
+window.addEventListener('keydown', e => {
+  const k = KEYMAP[e.key]; if (!k || S.mode !== 'manual') return;
+  e.preventDefault(); if (!keys[k]) { keys[k] = true; pedalChanged(); }
+}, true);
+window.addEventListener('keyup', e => {
+  const k = KEYMAP[e.key]; if (!k) return;
+  if (S.mode === 'manual') e.preventDefault();
+  keys[k] = false; pedalChanged();
+}, true);
+window.addEventListener('blur', () => { keys.gas = keys.brk = false; ptr.gas = ptr.brk = false; pedalChanged(); });
+for (const [id, k] of [['pGas', 'gas'], ['pBrk', 'brk']]) {
+  const el = $(id);
+  el.addEventListener('pointerdown', e => { e.preventDefault(); el.setPointerCapture(e.pointerId); ptr[k] = true; pedalChanged(); });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.addEventListener(ev, () => { ptr[k] = false; pedalChanged(); });
+  el.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+// ---------------- challenge: you vs the algorithm ----------------
+const CH_PRE = 120, CH_DUR = 120, BENCH_US = [5.8, 6.0, 6.2], Q_TOL = 0.98;
+const CH = { state: 'idle', attempts: [], seedRuns: {} };
+function runBench(sd, mode, U) {                      // same seed + same pre-run = same traffic the player inherits
+  const keep = S;
+  newSim(sd); S.headless = true;
+  for (let i = 0; i < Math.round(CH_PRE/DT); i++) stepSim();
+  S.mode = mode; S.U = U || 0; if (mode === 'pi') S.pi.vcmd = S.cars[N-1].v;
+  let s = 0, s2 = 0, c = 0;
+  S.onSample = () => { for (const car of S.cars) { s += car.v; s2 += car.v*car.v; } c += N; };
+  for (let i = 0; i < Math.round(CH_DUR/DT); i++) stepSim();
+  const m = s/c, r = { sd: Math.sqrt(Math.max(0, (s2 - c*m*m)/(c-1))), q: N/L*m*3600 };
+  S = keep; return r;
+}
+function startChallenge() {
+  const human = runBench(seed, 'human');
+  let best = null;
+  for (const U of BENCH_US) {
+    const r = runBench(seed, 'fs', U); r.U = U;
+    const okQ = r.q >= human.q*Q_TOL;
+    if (!best || (okQ && (!best.okQ || r.sd < best.sd)) || (!okQ && !best.okQ && r.sd < best.sd)) { best = r; best.okQ = okQ; }
+  }
+  if (document.activeElement) document.activeElement.blur();
+  restart();
+  setSimSpeed(1);
+  for (let i = 0; i < Math.round(CH_PRE/DT); i++) stepSim();   // fast-forward: waves form, time-space diagram fills
+  let s = 0, n = 0;                                    // reference speed = mean speed over the last lap (≈38 s), like Experiment B's observer
+  for (let j = 0; j < Math.min(190, total); j++) { s += samp.sumV[(total-1-j) % NS]; n += N; }
+  Object.assign(CH, { state: 'ready', human, algo: best, refV: s/n, sumV: 0, sumV2: 0, cnt: 0, t0: null });
+  S.aeb = 0;
+  setMode('manual', true);
+  setPaused(true);
+  CH.runNo = (CH.seedRuns[seed] = (CH.seedRuns[seed] || 0) + 1);
+  $('chStatus').innerHTML = `<b>准备好了</b>：停走波已经形成。按 <b>↑ / W</b> 或点「油门」/「刹车」开始计时 120 秒（实时）。` +
+    `参考：上一圈车流平均速度 <b>${CH.refV.toFixed(1)} m/s</b>（就像论文实验 B 里观察员报给司机的数字）。`;
+}
+function beginChallengeDrive() {
+  CH.state = 'running'; CH.t0 = S.t; S.aeb = 0; setPaused(false);
+  $('chStatus').innerHTML = `<b>进行中</b>：别让前车的急刹传到你身后。`;
+}
+function finishChallenge() {
+  CH.state = 'done'; setPaused(true);
+  const m = CH.sumV/CH.cnt, sd = Math.sqrt(Math.max(0, (CH.sumV2 - CH.cnt*m*m)/(CH.cnt-1))), q = N/L*m*3600;
+  const okQ = q >= CH.human.q*Q_TOL;
+  let verdict, cls = '';
+  if (!okQ) { verdict = '太慢：拖慢了整条路'; cls = 'slow'; }
+  else if (sd <= CH.algo.sd) { verdict = '★ 赢过算法'; cls = 'win'; }
+  else if (sd < GOAL_SD) { verdict = '平稳达成'; cls = 'win'; }
+  else if (sd < CH.human.sd*0.7) { verdict = '有效果，还没赢算法'; }
+  else verdict = '波还在';
+  CH.attempts.push({ seed, run: CH.runNo, sd, q, human: CH.human, algo: CH.algo, aeb: S.aeb, verdict, cls });
+  mark('挑战结束', '#34d399');
+  renderChallenge();
+  $('chStatus').innerHTML = `<b>结束</b>：你的 σ = <b>${sd.toFixed(2)}</b>（人类基准 ${CH.human.sd.toFixed(2)}，算法最佳 ${CH.algo.sd.toFixed(2)} @U=${CH.algo.U.toFixed(1)}），` +
+    `吞吐 ${q.toFixed(0)}（需 ≥ ${(CH.human.q*Q_TOL).toFixed(0)}），AEB ${S.aeb} 次 → <b>${verdict}</b>。再点「开始挑战」用同一组司机重来，或「换一组司机」。`;
+}
+function abortChallenge() {
+  CH.state = 'idle'; setPaused(false);
+  $('chStatus').innerHTML = '挑战已中断。点「开始挑战」重新开始。';
+}
+function renderChallenge() {
+  $('chLog').innerHTML = CH.attempts.map((a, i) =>
+    `<tr class="${a.cls}"><td>${i+1}</td><td>${a.seed === 1 ? '默认' : a.seed} · 第${a.run}次</td><td>${a.sd.toFixed(2)}</td><td>${a.q.toFixed(0)}</td>` +
+    `<td>${a.human.sd.toFixed(2)}</td><td>${a.algo.sd.toFixed(2)} (U=${a.algo.U.toFixed(1)})</td><td>${a.aeb}</td><td>${a.verdict}</td></tr>`
+  ).reverse().join('');
+}
+$('chStart').onclick = startChallenge;
 
 // ---------------- rendering ----------------
 function lerp(a, b, t) { return a + (b-a)*t; }
@@ -391,7 +541,62 @@ function drawRing() {
   rc.font = `600 ${Math.round(W*0.085)}px sans-serif`; rc.fillText(sd.toFixed(2), cx, cy);
   rc.font = `${Math.round(W*0.03)}px sans-serif`;
   rc.fillText(sd > WAVE_SD ? '⚠ 停走波' : sd < GOAL_SD ? '平稳' : '波动中', cx, cy + W*0.07);
-  rc.fillStyle = '#8b97b3'; rc.fillText(`t = ${S.t.toFixed(0)} s`, cx, cy + W*0.12);
+  rc.fillStyle = '#8b97b3';
+  if (CH.state === 'running') {
+    rc.fillStyle = '#ff2d55'; rc.fillText(`挑战剩余 ${Math.max(0, CH_DUR - (S.t - CH.t0)).toFixed(0)} s`, cx, cy + W*0.12);
+  } else if (CH.state === 'ready') {
+    rc.fillStyle = '#ff2d55'; rc.fillText('按 ↑ / W 或「油门」开始', cx, cy + W*0.12);
+  } else rc.fillText(`t = ${S.t.toFixed(0)} s`, cx, cy + W*0.12);
+}
+
+// driver's view: the 80 m ahead of the CyberCab, unrolled into a straight line, plus a speed gauge
+const ahead = $('ahead'), ac = ahead.getContext('2d');
+function drawAhead() {
+  if (S.mode !== 'manual') return;
+  ac.setTransform(2, 0, 0, 2, 0, 0);                    // 2x backing store, 400x150 logical px
+  const W = 400, H = 150, X0 = 34, RANGE = 80, sx = (W - X0 - 10)/RANGE, ROAD = 44, RH = 24;
+  ac.fillStyle = '#070b17'; ac.fillRect(0, 0, W, H);
+  ac.fillStyle = '#1b2542'; ac.fillRect(0, ROAD - RH/2, W, RH);
+  ac.font = '11px sans-serif'; ac.textBaseline = 'middle';
+  for (let m = 0; m <= RANGE; m += 20) {
+    const x = X0 + m*sx; ac.fillStyle = '#3a4770'; ac.fillRect(x, ROAD + RH/2, 1, 4);
+    ac.fillStyle = '#8b97b3'; ac.textAlign = m === 0 ? 'left' : m === RANGE ? 'right' : 'center'; ac.fillText(`${m} m`, x, ROAD + RH/2 + 11);
+  }
+  const av = S.cars[N-1];
+  for (let j = 0; j < N-1; j++) {                      // cars ahead in driving order
+    const c = S.cars[j]; let d = c.x - av.x; if (d <= 0) d += L;
+    if (d - c.len > RANGE) continue;
+    const x1 = X0 + (d - c.len)*sx, x2 = X0 + Math.min(d, RANGE + 3)*sx;
+    ac.fillStyle = rgb(speedRGB(c.v)); ac.beginPath(); ac.roundRect(x1, ROAD - 7, x2 - x1, 14, 3); ac.fill();
+    if (c.flash > 0) { ac.strokeStyle = '#fff'; ac.lineWidth = 2; ac.stroke(); }
+    ac.fillStyle = '#e6ebf5'; ac.textAlign = 'center'; ac.fillText(c.v.toFixed(1), (x1 + x2)/2, ROAD - 19);
+  }
+  ac.fillStyle = '#ff2d55'; ac.beginPath(); ac.roundRect(X0 - av.len*sx, ROAD - 8, av.len*sx, 16, 3); ac.fill();
+  ac.strokeStyle = '#fff'; ac.lineWidth = av.flash > 0 ? 3 : 1.5; ac.stroke();
+  const g = gapOf(N-1);                                // gap to the leader
+  ac.textAlign = 'left'; ac.font = '600 12px sans-serif';
+  ac.fillStyle = g < 5 ? '#ef4444' : '#e6ebf5'; ac.fillText(`车距 ${g.toFixed(1)} m`, 4, ROAD + RH/2 + 26);
+  ac.font = '11px sans-serif'; ac.fillStyle = '#8b97b3'; ac.fillText('前方 80 m（展开成直线）· 数字 = 车速 m/s', 4, 9);
+  ac.textAlign = 'right'; ac.fillStyle = S.aeb ? '#f59e0b' : '#8b97b3'; ac.fillText(`AEB 介入 ${S.aeb} 次`, W - 4, 9);
+  // speed gauge
+  const GY = 118, GX0 = 54, GX1 = W - 10, VMAX = 10, gx = v => GX0 + Math.min(v, VMAX)/VMAX*(GX1 - GX0);
+  ac.fillStyle = '#1b2542'; ac.fillRect(GX0, GY, GX1 - GX0, 14);
+  ac.fillStyle = '#ff2d55'; ac.fillRect(GX0, GY, gx(av.v) - GX0, 14);
+  ac.font = '10px sans-serif';
+  for (let v = 0; v <= VMAX; v += 2) { ac.fillStyle = '#8b97b3'; ac.textAlign = 'center'; ac.fillText(`${v}`, gx(v), GY + 24); }
+  const lead = S.cars[0], refV = CH.state === 'ready' || CH.state === 'running' ? CH.refV : flowMean38();
+  ac.fillStyle = '#facc15'; ac.fillRect(gx(lead.v) - 1.5, GY - 5, 3, 24);
+  ac.fillStyle = '#34d399'; ac.fillRect(gx(refV) - 1.5, GY - 5, 3, 24);
+  ac.textAlign = 'left'; ac.fillStyle = '#e6ebf5'; ac.font = '600 13px sans-serif'; ac.fillText(`${av.v.toFixed(1)}`, 4, GY + 7);
+  ac.font = '11px sans-serif'; ac.fillStyle = '#8b97b3'; ac.fillText('m/s', 4, GY + 22);
+  ac.fillStyle = '#facc15'; ac.fillText(`▌前车 ${lead.v.toFixed(1)}`, GX0, GY - 13);
+  ac.fillStyle = '#34d399'; ac.fillText(`▌参考均速 ${refV.toFixed(1)}`, GX0 + 86, GY - 13);
+  ac.fillStyle = S.pp > 0.05 ? '#34d399' : S.pp < -0.05 ? '#ef4444' : '#8b97b3'; ac.textAlign = 'right';
+  ac.fillText(S.pp > 0.05 ? `油门 ${(S.pp*100).toFixed(0)}%` : S.pp < -0.05 ? `刹车 ${(-S.pp*100).toFixed(0)}%` : '滑行', GX1, GY - 13);
+}
+function flowMean38() {
+  let s = 0, n = 0; for (let j = 0; j < Math.min(190, total); j++) { s += samp.sumV[(total-1-j) % NS]; n += N; }
+  return n ? s/n : 0;
 }
 
 // time-space diagram: offscreen strip, 1 px column per 0.2 s sample
@@ -479,9 +684,9 @@ function frame(ts) {
   if (!paused) {
     acc += fdt*simSpeed;
     let guard = 0;
-    while (acc >= DT && guard++ < 400) { stepSim(); acc -= DT; }
-  }
-  drawRing(); drawTs(); updatePanel();
+    while (!paused && acc >= DT && guard++ < 400) { stepSim(); acc -= DT; }
+  } else acc = 0;
+  drawRing(); drawTs(); drawAhead(); updatePanel();
   requestAnimationFrame(frame);
 }
 newSim(seed); showU(); $('modeHint').textContent = HINTS.human; resetRecords(); renderLog();
