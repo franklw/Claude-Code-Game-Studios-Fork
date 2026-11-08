@@ -1,0 +1,491 @@
+<!--
+  PROTOTYPE - NOT FOR PRODUCTION
+  Question: 玩家调 CyberCab 的设定速度 U、切换控制模式，能否获得“一辆车让整个环路安静下来”的满足感？
+            信号：3 分钟内找到最优 U（全环路车速标准差 < 1.0 m/s 且吞吐量不低于有波时），并主动重来或尝试其他模式。
+  Date: 2026-11-08
+  Source: Stern et al., "Dissipation of stop-and-go waves via control of autonomous vehicles: Field experiments",
+          Transportation Research Part C 89 (2018), arXiv:1705.01693
+-->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环路吸波原型</title>
+<style>
+  :root {
+    --bg: #0b1020; --panel: #121a30; --line: #24304f; --text: #e6ebf5; --muted: #8b97b3;
+    --cc: #ff2d55; --ok: #34d399; --warn: #f59e0b; --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+  header { padding: 12px 16px 4px; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .goal { color: var(--muted); margin: 0; }
+  .goal b { color: var(--text); }
+  main { display: grid; grid-template-columns: minmax(300px, 440px) 1fr; gap: 12px; padding: 12px 16px 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-width: 0; }
+  .panel h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 8px; letter-spacing: .02em; }
+  canvas { display: block; width: 100%; }
+  #ring { aspect-ratio: 1 / 1; }
+  #ts { aspect-ratio: 900 / 300; background: #070b17; border-radius: 6px; }
+  #sd { aspect-ratio: 900 / 160; background: #070b17; border-radius: 6px; margin-top: 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+  .seg button, .btn { background: #1b2542; color: var(--text); border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 10px; font: inherit; cursor: pointer; }
+  .seg button.on { background: var(--accent); color: #07122b; border-color: var(--accent); font-weight: 600; }
+  .btn:hover, .seg button:hover { border-color: var(--accent); }
+  .btn.danger { border-color: #7f1d1d; }
+  .hint { color: var(--muted); font-size: 12px; min-height: 2.9em; margin: 2px 0 6px; }
+  input[type=range] { width: 100%; accent-color: var(--cc); }
+  .ulab { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .ulab b { color: var(--text); font-size: 15px; }
+  .dis { opacity: .4; pointer-events: none; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; margin-top: 8px; }
+  .m { background: #0e1528; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  .m .k { color: var(--muted); font-size: 11px; }
+  .m .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); }
+  .chip.ok { border-color: var(--ok); color: var(--ok); }
+  #banner { margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--ok); color: var(--ok); display: none; }
+  .legend { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 6px; flex-wrap: wrap; }
+  .bar { width: 140px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #ea580c, #facc15, #2dd4bf); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--cc); vertical-align: -1px; }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; margin-top: 4px; }
+  th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  tr.cur td { color: var(--accent); }
+  tr.good td:last-child { color: var(--ok); }
+  .right { display: grid; gap: 12px; min-width: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>环路吸波原型 · 260 m 单车道 · 21 辆车</h1>
+  <p class="goal">你只能控制 <span class="sw"></span> <b>红色 CyberCab</b>。目标：让全环路车速标准差 <b>&lt; 1.0 m/s</b>，同时吞吐量不低于有停走波时的水平。</p>
+</header>
+<main>
+  <section class="panel">
+    <canvas id="ring" width="880" height="880"></canvas>
+    <div class="legend"><span>车速 0</span><span class="bar"></span><span>8 m/s</span><span><span class="sw"></span> CyberCab（浅红弧 = 它前方的缓冲车距）</span></div>
+
+    <h2 style="margin-top:12px">CyberCab 控制模式</h2>
+    <div class="row seg" id="modes">
+      <button data-m="human" class="on">人类驾驶</button>
+      <button data-m="fs">FollowerStopper</button>
+      <button data-m="pi">PI 饱和控制</button>
+    </div>
+    <div class="hint" id="modeHint"></div>
+    <div id="uBox" class="dis">
+      <div class="ulab"><span>设定速度 U</span><span><b id="uVal">7.0</b> m/s · <span id="uKmh">25.2</span> km/h</span></div>
+      <input id="u" type="range" min="4" max="8" step="0.1" value="7.0">
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <span style="color:var(--muted);font-size:12px">倍速</span>
+      <span class="seg" id="speeds"><button data-s="1">1×</button><button data-s="2" class="on">2×</button><button data-s="4">4×</button><button data-s="8">8×</button></span>
+      <button class="btn" id="pause">暂停</button>
+    </div>
+    <div class="row">
+      <button class="btn danger" id="brake">让一辆车急刹 1.5 秒</button>
+      <button class="btn" id="reset">重来（同一组司机）</button>
+      <button class="btn" id="reseed">换一组司机</button>
+    </div>
+  </section>
+
+  <div class="right">
+    <section class="panel">
+      <h2>时空轨迹图 — 横轴：最近 180 秒；纵轴：环路位置 0–260 m。斜向的橙色条纹就是向后传播的停走波</h2>
+      <canvas id="ts" width="900" height="300"></canvas>
+      <canvas id="sd" width="900" height="160"></canvas>
+      <div class="legend"><span>下图：全环路瞬时车速标准差</span><span style="color:var(--warn)">— — 2.5 m/s 停走波阈值（论文判定标准）</span><span style="color:var(--ok)">— — 1.0 m/s 目标</span></div>
+
+      <div class="metrics">
+        <div class="m"><div class="k">车速标准差 σ（近 30 s）</div><div class="v" id="mSd">–</div></div>
+        <div class="m"><div class="k">平均车速（近 30 s）</div><div class="v" id="mV">–</div></div>
+        <div class="m"><div class="k">吞吐量 q = n/L·v̄</div><div class="v" id="mQ">–</div></div>
+        <div class="m"><div class="k">油耗（估算模型）</div><div class="v" id="mF">–</div></div>
+        <div class="m"><div class="k">急刹（次/车/km）</div><div class="v" id="mB">–</div></div>
+        <div class="m"><div class="k">CyberCab 车速 / 前车距</div><div class="v" id="mAv" style="font-size:15px">–</div></div>
+      </div>
+      <div class="chips"><span class="chip" id="c1">平稳：σ &lt; 1.0</span><span class="chip" id="c2">不减速：q ≥ 有波基准 <span id="qb">–</span></span><span class="chip" id="ctime">首次启用控制后：–</span></div>
+      <div id="banner"></div>
+    </section>
+
+    <section class="panel">
+      <h2>实验记录 — 每次切换模式或松开 U 滑块都会新开一行（对照论文表 1）</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>开始(s)</th><th>设置</th><th>时长(s)</th><th>σ (m/s)</th><th>v̄ (m/s)</th><th>油耗 (L/100km)</th><th>急刹</th><th>吞吐 (veh/h)</th><th>达标</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table></div>
+    </section>
+  </div>
+</main>
+
+<script>
+// PROTOTYPE - NOT FOR PRODUCTION
+// Question: does tuning one CyberCab's set speed U to dissolve a phantom jam feel satisfying, and does it hold attention past the first "aha"?
+// Date: 2026-11-08
+
+// ---------------- simulation ----------------
+const L = 260, DT = 0.05, SAMPLE_EVERY = 4;          // 20 Hz physics, 5 Hz samples (0.2 s)
+const LENS = [5.22,5.15,4.86,4.87,5.15,5.15,4.86,4.92,5.09,4.86,4.86,5.69,5.21,5.15,4.87,5.15,4.86,4.87,5.15,5.70,4.44]; // paper Table 5, #21 = CAT Vehicle
+const N = 21;
+// human drivers: OV-FTL car-following + Ornstein-Uhlenbeck acceleration noise (tuned so waves appear in ~50–80 s)
+const HP = { vm: 9.75, d0: 3.05, a: 0.5, aspread: 0.2, beta: 20, noise: 0.15, noiseTau: 1.0 };
+const BRK_ON = 1.5, BRK_OFF = 0.75;                   // braking event: decel peak > 1.5 m/s², released below 0.75
+const WAVE_SD = 2.5, GOAL_SD = 1.0, REF_Q = 1680;     // REF_Q = typical wave-state throughput in this sim
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+let S, seed = 1;
+function newSim(sd) {
+  const rnd = mulberry32(sd);
+  const gauss = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); };
+  const cars = [];
+  for (let i = 0; i < N; i++) cars.push({ x: i*L/N, v: 0, a: 0, len: LENS[i], amax: HP.a + (rnd()-0.5)*HP.aspread,
+    eps: 0, brakeTimer: 0, braking: false, flash: 0, av: i === N-1 });
+  S = { cars, rnd, gauss, t: 0, steps: 0, mode: 'human', U: +uEl.value, pi: { hist: [], vcmd: 0, U: 0 },
+        cumFuel: 0, cumDist: 0, cumBrakes: 0, collisions: 0 };
+}
+function gapOf(i) { const c = S.cars[i], l = S.cars[(i+1)%N]; let g = l.x - c.x; if (g <= 0) g += L; return g - l.len; }
+
+function followerStopper(g, vav, vl, U) {            // paper eq. (1)-(2)
+  const dvm = Math.min(vl - vav, 0);
+  const x1 = 4.5 + dvm*dvm/(2*1.5), x2 = 5.25 + dvm*dvm/(2*1.0), x3 = 6.0 + dvm*dvm/(2*0.5);
+  const v = Math.min(Math.max(vl, 0), U);
+  if (g <= x1) return 0;
+  if (g <= x2) return v*(g-x1)/(x2-x1);
+  if (g <= x3) return v + (U-v)*(g-x2)/(x3-x2);
+  return U;
+}
+function piSaturation(g, vav, vl) {                  // paper eq. (3)-(5)
+  const p = S.pi;
+  const U = p.hist.length ? p.hist.reduce((s, x) => s + x, 0)/p.hist.length : vav;
+  const gl = 7, gu = 30, vcatch = 1, gamma = 2;
+  const vt = U + vcatch*Math.min(Math.max((g-gl)/(gu-gl), 0), 1);
+  const dxs = Math.max(2*(vl - vav), 4);
+  const al = Math.min(Math.max((g-dxs)/gamma, 0), 1), be = 1 - 0.5*al;
+  p.vcmd = be*(al*vt + (1-al)*vl) + (1-be)*p.vcmd;
+  p.U = U;
+  return p.vcmd;
+}
+function fuelRate(v, a) {                            // mL/s — crude power-based estimate, NOT the paper's OBD-II measurement
+  const P = v*(1800*a + 1800*9.81*0.012 + 0.5*1.2*0.75*v*v)/1000;
+  return 0.55 + 0.12*Math.max(P, 0);
+}
+function stepSim() {
+  const cars = S.cars, acc = new Array(N);
+  const av = cars[N-1];
+  S.pi.hist.push(av.v); if (S.pi.hist.length > Math.round(38/DT)) S.pi.hist.shift();   // 38 s ≈ one lap
+  for (let i = 0; i < N; i++) {
+    const c = cars[i], l = cars[(i+1)%N], g = gapOf(i);
+    let a;
+    if (c.av && S.mode !== 'human') {
+      const vcmd = S.mode === 'fs' ? followerStopper(g, c.v, l.v, S.U) : piSaturation(g, c.v, l.v);
+      const e = vcmd - c.v, tau = e <= -0.25 ? 0.36 : 0.73;     // low-level: brake mode faster than throttle mode (paper §3.3)
+      a = Math.max(-4, Math.min(1.5, e/tau));
+    } else {
+      if (c.av) S.pi.vcmd = c.v;
+      const V = HP.vm*(Math.tanh(g/HP.d0 - 2) + Math.tanh(2))/(1 + Math.tanh(2));
+      a = c.amax*(Math.max(V, 0) - c.v) + HP.beta*(l.v - c.v)/Math.max(g*g, 1);
+      if (g < 2.0 + 0.3*c.v && l.v < c.v) a = Math.min(a, -((c.v-l.v)*(c.v-l.v))/(2*Math.max(g-1.0, 0.3)) - 0.5);
+      c.eps += -c.eps*DT/HP.noiseTau + HP.noise*Math.sqrt(2*DT/HP.noiseTau)*S.gauss();
+      a += c.eps;
+      if (c.brakeTimer > 0) { a = Math.min(a, -4); c.brakeTimer -= DT; }
+      a = Math.max(-6, Math.min(2.5, a));
+    }
+    acc[i] = a;
+  }
+  for (let i = 0; i < N; i++) {
+    const c = cars[i];
+    const v = Math.max(0, c.v + acc[i]*DT), ra = (v - c.v)/DT, dx = (c.v + v)/2*DT;
+    c.a = ra; c.x = (c.x + dx) % L; c.v = v;
+    S.cumDist += dx; S.cumFuel += fuelRate(v, ra)*DT;
+    if (!c.braking && ra < -BRK_ON) { c.braking = true; S.cumBrakes++; }
+    else if (c.braking && ra > -BRK_OFF) c.braking = false;
+    if (c.flash > 0) c.flash -= DT;
+  }
+  for (let i = 0; i < N; i++) if (gapOf(i) < 0.3) {
+    const c = cars[i], l = cars[(i+1)%N]; S.collisions++;
+    c.x = (l.x - l.len - 0.3 + L) % L; c.v = Math.min(c.v, l.v);
+  }
+  S.t += DT; S.steps++;
+  if (S.steps % SAMPLE_EVERY === 0) takeSample();
+}
+
+// ---------------- samples, metrics, interval log ----------------
+const NS = 900, WIN = 150;                           // 180 s history, 30 s rolling window
+let samp, total, events, intervals, firstControlT, goalSince, achievedAt, waveSeenInRow;
+function resetRecords() {
+  samp = { sumV: new Float64Array(NS), sumV2: new Float64Array(NS), sd: new Float64Array(NS),
+           fuel: new Float64Array(NS), dist: new Float64Array(NS), brakes: new Float64Array(NS) };
+  total = 0; events = []; intervals = []; firstControlT = null; goalSince = null; achievedAt = null;
+  tsCtx.fillStyle = '#070b17'; tsCtx.fillRect(0, 0, NS, 300);
+  $('banner').style.display = 'none';
+  openInterval(modeLabel());
+}
+function takeSample() {
+  let s = 0, s2 = 0; for (const c of S.cars) { s += c.v; s2 += c.v*c.v; }
+  const m = s/N, sd = Math.sqrt(Math.max(0, (s2 - N*m*m)/(N-1)));
+  const k = total % NS;
+  samp.sumV[k] = s; samp.sumV2[k] = s2; samp.sd[k] = sd;
+  samp.fuel[k] = S.cumFuel; samp.dist[k] = S.cumDist; samp.brakes[k] = S.cumBrakes;
+  total++;
+  const iv = intervals[intervals.length-1];
+  iv.sumV += s; iv.sumV2 += s2; iv.cnt += N;
+  if (S.mode === 'human' && !waveSeenInRow && sd > WAVE_SD && S.t > 5) {
+    waveSeenInRow = true; mark('停走波', '#f59e0b'); splitInterval('人类驾驶（停走波出现）', true);
+  }
+  if (total % 5 === 0) checkGoal();                  // once per simulated second, independent of frame rate
+  drawTsColumn();
+}
+function checkGoal() {
+  const w = windowStats(WIN); if (!w) return;
+  const ok = S.mode !== 'human' && w.sd < GOAL_SD && w.q >= baselineQ().q;
+  if (ok) { if (goalSince === null) goalSince = S.t; } else goalSince = null;
+  if (goalSince !== null && S.t - goalSince >= 10 && achievedAt === null) {
+    achievedAt = S.t; mark('★ 平稳', '#34d399');
+    $('banner').style.display = 'block';
+    $('banner').textContent = `★ 环路已平稳：近 30 秒 σ = ${w.sd.toFixed(2)} m/s，吞吐 ${w.q.toFixed(0)} veh/h。` +
+      `从首次启用控制到达成用了 ${(achievedAt - firstControlT).toFixed(0)} 秒（仿真时间）。试试另一种模式，或者让一辆车急刹看看它扛不扛得住。`;
+  }
+}
+function windowStats(n) {
+  n = Math.min(n, total - 1); if (n < 5) return null;
+  const a = (total-1) % NS, b = (total-1-n) % NS;
+  let s = 0, s2 = 0, c = 0;
+  for (let j = 0; j < n; j++) { const k = (total-1-j) % NS; s += samp.sumV[k]; s2 += samp.sumV2[k]; c += N; }
+  const m = s/c, sd = Math.sqrt(Math.max(0, (s2 - c*m*m)/(c-1)));
+  const dd = samp.dist[a] - samp.dist[b];
+  return { sd, v: m, q: N/L*m*3600, fuel: dd > 0 ? (samp.fuel[a]-samp.fuel[b])/dd*100 : 0,
+           br: dd > 0 ? (samp.brakes[a]-samp.brakes[b])/(dd/1000) : 0 };
+}
+function openInterval(label, isWave) {
+  intervals.push({ t0: S.t, label, isWave: !!isWave, mode: S.mode, sumV: 0, sumV2: 0, cnt: 0,
+                   f0: S.cumFuel, d0: S.cumDist, b0: S.cumBrakes, end: null });
+  waveSeenInRow = !!isWave;
+}
+function closeInterval() {
+  const iv = intervals[intervals.length-1];
+  iv.end = { t: S.t, f: S.cumFuel, d: S.cumDist, b: S.cumBrakes };
+}
+function splitInterval(label, isWave) {
+  const cur = intervals[intervals.length-1];
+  if (S.t - cur.t0 < 1) intervals.pop(); else closeInterval();   // drop rows shorter than 1 s (e.g. mode switch then immediate U change)
+  openInterval(label, isWave); renderLog();
+}
+function ivStats(iv) {
+  const e = iv.end || { t: S.t, f: S.cumFuel, d: S.cumDist, b: S.cumBrakes };
+  const dur = e.t - iv.t0, dd = e.d - iv.d0;
+  if (iv.cnt < 2 || dur < 5 || dd <= 0) return { dur, ok: false };
+  const m = iv.sumV/iv.cnt, sd = Math.sqrt(Math.max(0, (iv.sumV2 - iv.cnt*m*m)/(iv.cnt-1)));
+  return { dur, ok: true, sd, v: m, q: N/L*m*3600, fuel: (e.f-iv.f0)/dd*100, br: (e.b-iv.b0)/(dd/1000) };
+}
+function baselineQ() {
+  for (let i = intervals.length-1; i >= 0; i--) {
+    const iv = intervals[i]; if (!iv.isWave) continue;
+    const st = ivStats(iv); if (st.ok && st.dur >= 20) return { q: st.q, ref: false };
+  }
+  return { q: REF_Q, ref: true };
+}
+function mark(label, color) { events.push({ idx: total, label, color }); }
+
+// ---------------- UI wiring ----------------
+const $ = id => document.getElementById(id);
+const uEl = $('u');
+const HINTS = {
+  human: '像其他司机一样开：拼命追前车、不留缓冲。它自己也会参与制造停走波。',
+  fs: 'FollowerStopper：按设定速度 U 巡航；车距不够时按三条安全曲线减速到前车速度或停车。U 需要你来给定。',
+  pi: 'PI 饱和控制：自己估算过去 38 秒（约一圈）的平均车速并按它行驶；车近时跟前车，车远时最多快 1 m/s 去追。不需要外部输入。'
+};
+function modeLabel() {
+  return S.mode === 'human' ? '人类驾驶' : S.mode === 'fs' ? `FollowerStopper U=${S.U.toFixed(1)}` : 'PI 饱和控制';
+}
+function setMode(m) {
+  if (m === S.mode) return;
+  S.mode = m;
+  if (m === 'pi') S.pi.vcmd = S.cars[N-1].v;
+  if (m !== 'human' && firstControlT === null) firstControlT = S.t;
+  document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
+  $('uBox').classList.toggle('dis', m !== 'fs');
+  $('modeHint').textContent = HINTS[m];
+  mark(modeLabel(), m === 'human' ? '#8b97b3' : '#ff2d55');
+  splitInterval(modeLabel());
+}
+document.querySelectorAll('#modes button').forEach(b => b.onclick = () => setMode(b.dataset.m));
+function showU() { $('uVal').textContent = (+uEl.value).toFixed(1); $('uKmh').textContent = (uEl.value*3.6).toFixed(1); }
+uEl.oninput = () => { S.U = +uEl.value; showU(); };
+uEl.onchange = () => { S.U = +uEl.value; showU(); if (S.mode === 'fs') { mark('U=' + S.U.toFixed(1), '#ff2d55'); splitInterval(modeLabel()); } };
+let simSpeed = 2, paused = false;
+document.querySelectorAll('#speeds button').forEach(b => b.onclick = () => {
+  simSpeed = +b.dataset.s; document.querySelectorAll('#speeds button').forEach(x => x.classList.toggle('on', x === b));
+});
+$('pause').onclick = () => { paused = !paused; $('pause').textContent = paused ? '继续' : '暂停'; };
+$('brake').onclick = () => {
+  const cand = S.cars.filter(c => !c.av && c.v > 2);
+  const c = (cand.length ? cand : S.cars.filter(c => !c.av))[Math.floor(S.rnd()*(cand.length || N-1))];
+  c.brakeTimer = 1.5; c.flash = 3; mark('急刹', '#e6ebf5');
+};
+function restart() {
+  newSim(seed); setModeSilently('human'); resetRecords(); renderLog();
+}
+function setModeSilently(m) {
+  S.mode = m;
+  document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
+  $('uBox').classList.toggle('dis', m !== 'fs'); $('modeHint').textContent = HINTS[m];
+}
+$('reset').onclick = restart;
+$('reseed').onclick = () => { seed = Math.floor(Math.random()*1e6) + 2; restart(); };
+
+// ---------------- rendering ----------------
+function lerp(a, b, t) { return a + (b-a)*t; }
+const STOPS = [[0, [234,88,12]], [3.5, [250,204,21]], [7, [45,212,191]]];
+function speedRGB(v) {
+  if (v <= STOPS[0][0]) return STOPS[0][1];
+  for (let i = 1; i < STOPS.length; i++) if (v <= STOPS[i][0]) {
+    const t = (v - STOPS[i-1][0])/(STOPS[i][0] - STOPS[i-1][0]);
+    return STOPS[i-1][1].map((x, k) => Math.round(lerp(x, STOPS[i][1][k], t)));
+  }
+  return STOPS[STOPS.length-1][1];
+}
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+const ring = $('ring'), rc = ring.getContext('2d');
+function drawRing() {
+  const W = ring.width, cx = W/2, cy = W/2, R = W*0.40, k = 2*Math.PI*R/L; // px per metre
+  rc.fillStyle = '#121a30'; rc.fillRect(0, 0, W, W);
+  rc.strokeStyle = '#2a3658'; rc.lineWidth = 2.6*k; rc.beginPath(); rc.arc(cx, cy, R, 0, Math.PI*2); rc.stroke();
+  rc.strokeStyle = '#3a4770'; rc.lineWidth = 1; rc.setLineDash([6, 10]);
+  rc.beginPath(); rc.arc(cx, cy, R + 1.6*k, 0, Math.PI*2); rc.stroke();
+  rc.beginPath(); rc.arc(cx, cy, R - 1.6*k, 0, Math.PI*2); rc.stroke(); rc.setLineDash([]);
+  const ang = x => -x/L*2*Math.PI;                  // counter-clockwise, like the Tucson track
+  // CyberCab buffer arc
+  const av = S.cars[N-1], ld = S.cars[0];
+  const a0 = ang(av.x), a1 = ang(ld.x - ld.len);
+  rc.strokeStyle = 'rgba(255,45,85,0.28)'; rc.lineWidth = 2.2*k; rc.beginPath();
+  rc.arc(cx, cy, R, a0, a1 <= a0 ? a1 : a1 - 2*Math.PI, true); rc.stroke();
+  for (const c of S.cars) {
+    const th = ang(c.x - c.len/2);
+    rc.save(); rc.translate(cx + R*Math.cos(th), cy + R*Math.sin(th)); rc.rotate(th);   // local x = radial (width), local y = tangential (length)
+    const w = 1.9*k, h = c.len*k*0.92;
+    rc.fillStyle = c.av ? '#ff2d55' : rgb(speedRGB(c.v));
+    rc.beginPath(); rc.roundRect(-w/2, -h/2, w, h, 3); rc.fill();
+    if (c.av) { rc.strokeStyle = '#fff'; rc.lineWidth = 2.5; rc.stroke(); }
+    if (c.flash > 0 && Math.floor(c.flash*6) % 2 === 0) { rc.strokeStyle = '#fff'; rc.lineWidth = 3; rc.stroke(); }
+    rc.restore();
+  }
+  // AV label
+  const th = ang(av.x - av.len/2), lx = cx + (R - 11*k)*Math.cos(th), ly = cy + (R - 11*k)*Math.sin(th);
+  rc.fillStyle = '#ff2d55'; rc.font = `600 ${Math.round(W*0.026)}px sans-serif`; rc.textAlign = 'center'; rc.textBaseline = 'middle';
+  rc.fillText('CyberCab', lx, ly);
+  // centre readout
+  const sd = total ? samp.sd[(total-1)%NS] : 0;
+  rc.fillStyle = '#8b97b3'; rc.font = `${Math.round(W*0.03)}px sans-serif`; rc.fillText('瞬时车速标准差', cx, cy - W*0.075);
+  rc.fillStyle = sd > WAVE_SD ? '#f59e0b' : sd < GOAL_SD ? '#34d399' : '#e6ebf5';
+  rc.font = `600 ${Math.round(W*0.085)}px sans-serif`; rc.fillText(sd.toFixed(2), cx, cy);
+  rc.font = `${Math.round(W*0.03)}px sans-serif`;
+  rc.fillText(sd > WAVE_SD ? '⚠ 停走波' : sd < GOAL_SD ? '平稳' : '波动中', cx, cy + W*0.07);
+  rc.fillStyle = '#8b97b3'; rc.fillText(`t = ${S.t.toFixed(0)} s`, cx, cy + W*0.12);
+}
+
+// time-space diagram: offscreen strip, 1 px column per 0.2 s sample
+const tsOff = document.createElement('canvas'); tsOff.width = NS; tsOff.height = 300;
+const tsCtx = tsOff.getContext('2d');
+const TS_H = 300, TS_PAD = 20;                       // plot area 260 px = 260 m
+function drawTsColumn() {
+  tsCtx.globalCompositeOperation = 'copy'; tsCtx.drawImage(tsOff, -1, 0); tsCtx.globalCompositeOperation = 'source-over';
+  tsCtx.fillStyle = '#070b17'; tsCtx.fillRect(NS-1, 0, 1, TS_H);
+  for (const c of S.cars) {
+    const y = TS_PAD + (L - c.x);
+    tsCtx.fillStyle = c.av ? '#ff2d55' : rgb(speedRGB(c.v));
+    tsCtx.fillRect(NS-1, y-1, 1, c.av ? 3 : 2);
+  }
+}
+const ts = $('ts'), tc = ts.getContext('2d'), sdc = $('sd'), sc = sdc.getContext('2d');
+function drawTs() {
+  tc.drawImage(tsOff, 0, 0, ts.width, ts.height);
+  const sx = ts.width/NS;
+  tc.font = '12px sans-serif'; tc.textBaseline = 'top';
+  for (const e of events) {
+    const x = (NS - (total - e.idx))*sx; if (x < 0) continue;
+    tc.strokeStyle = e.color; tc.globalAlpha = .7; tc.beginPath(); tc.moveTo(x, 0); tc.lineTo(x, ts.height); tc.stroke(); tc.globalAlpha = 1;
+    tc.fillStyle = e.color; tc.fillText(e.label, Math.min(x + 3, ts.width - 120), 3);
+  }
+  tc.fillStyle = '#8b97b3'; tc.textBaseline = 'bottom'; tc.fillText('260 m', 3, TS_PAD + 14); tc.fillText('0 m', 3, TS_PAD + L - 2);
+  tc.textBaseline = 'top'; tc.fillText('−180 s', 3, TS_PAD + L + 3);
+  tc.textAlign = 'right'; tc.fillText('现在', ts.width - 3, TS_PAD + L + 3); tc.textAlign = 'left';
+  // std-dev strip
+  const W = sdc.width, H = sdc.height, ymax = 5, Y = v => H - 6 - (Math.min(v, ymax)/ymax)*(H - 14);
+  sc.fillStyle = '#070b17'; sc.fillRect(0, 0, W, H);
+  sc.setLineDash([6, 6]); sc.lineWidth = 1;
+  sc.strokeStyle = '#f59e0b'; sc.beginPath(); sc.moveTo(0, Y(WAVE_SD)); sc.lineTo(W, Y(WAVE_SD)); sc.stroke();
+  sc.strokeStyle = '#34d399'; sc.beginPath(); sc.moveTo(0, Y(GOAL_SD)); sc.lineTo(W, Y(GOAL_SD)); sc.stroke();
+  sc.setLineDash([]);
+  for (const e of events) { const x = (NS - (total - e.idx))*(W/NS); if (x < 0) continue;
+    sc.strokeStyle = e.color; sc.globalAlpha = .5; sc.beginPath(); sc.moveTo(x, 0); sc.lineTo(x, H); sc.stroke(); sc.globalAlpha = 1; }
+  sc.strokeStyle = '#e6ebf5'; sc.lineWidth = 2; sc.beginPath();
+  const n = Math.min(total, NS);
+  for (let j = 0; j < n; j++) {
+    const k = (total - n + j) % NS, x = (NS - n + j)*(W/NS), y = Y(samp.sd[k]);
+    j ? sc.lineTo(x, y) : sc.moveTo(x, y);
+  }
+  sc.stroke();
+  sc.fillStyle = '#8b97b3'; sc.font = '12px sans-serif'; sc.textBaseline = 'top'; sc.fillText('σ (m/s) 0–5', 4, 3);
+}
+
+function fmt(x, d) { return Number.isFinite(x) ? x.toFixed(d) : '–'; }
+function renderLog() {
+  const bq = baselineQ();
+  const rows = intervals.map((iv, i) => {
+    const st = ivStats(iv), cur = i === intervals.length - 1;
+    const good = st.ok && iv.mode !== 'human' && st.sd < GOAL_SD && st.q >= bq.q;
+    return `<tr class="${cur ? 'cur' : ''} ${good ? 'good' : ''}"><td>${iv.t0.toFixed(0)}</td><td>${iv.label}${cur ? ' ◀' : ''}</td>` +
+      `<td>${st.dur.toFixed(0)}</td><td>${st.ok ? fmt(st.sd, 2) : '–'}</td><td>${st.ok ? fmt(st.v, 2) : '–'}</td>` +
+      `<td>${st.ok ? fmt(st.fuel, 1) : '–'}</td><td>${st.ok ? fmt(st.br, 2) : '–'}</td><td>${st.ok ? fmt(st.q, 0) : '–'}</td>` +
+      `<td>${good ? '✓' : ''}</td></tr>`;
+  });
+  $('log').innerHTML = rows.reverse().join('');
+}
+let lastLog = 0;
+function updatePanel() {
+  const w = windowStats(WIN);
+  const av = S.cars[N-1];
+  $('mAv').textContent = `${av.v.toFixed(1)} m/s · ${gapOf(N-1).toFixed(1)} m` + (S.mode === 'pi' ? ` · 估计U ${S.pi.U.toFixed(1)}` : '');
+  const bq = baselineQ();
+  $('qb').textContent = `${bq.q.toFixed(0)}${bq.ref ? '（参考值）' : ''}`;
+  if (!w) return;
+  $('mSd').textContent = `${w.sd.toFixed(2)} m/s`;
+  $('mV').textContent = `${w.v.toFixed(2)} m/s`;
+  $('mQ').textContent = `${w.q.toFixed(0)} veh/h`;
+  $('mF').textContent = `${w.fuel.toFixed(1)} L/100km`;
+  $('mB').textContent = w.br.toFixed(2);
+  const ok1 = w.sd < GOAL_SD, ok2 = w.q >= bq.q;
+  $('c1').classList.toggle('ok', ok1); $('c2').classList.toggle('ok', ok2);
+  $('ctime').textContent = firstControlT === null ? '首次启用控制后：–' : `首次启用控制后：${(S.t - firstControlT).toFixed(0)} s`;
+  if (S.t - lastLog > 1 || S.t < lastLog) { renderLog(); lastLog = S.t; }
+}
+
+// ---------------- main loop ----------------
+let lastTs = null, acc = 0;
+function frame(ts) {
+  if (lastTs === null) lastTs = ts;
+  const fdt = Math.min(0.1, (ts - lastTs)/1000); lastTs = ts;
+  if (!paused) {
+    acc += fdt*simSpeed;
+    let guard = 0;
+    while (acc >= DT && guard++ < 400) { stepSim(); acc -= DT; }
+  }
+  drawRing(); drawTs(); updatePanel();
+  requestAnimationFrame(frame);
+}
+newSim(seed); showU(); $('modeHint').textContent = HINTS.human; resetRecords(); renderLog();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
